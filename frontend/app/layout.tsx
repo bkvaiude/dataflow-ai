@@ -5,7 +5,7 @@ export const metadata: Metadata = {
   title: "DataFlow AI - Real-time Marketing Analytics",
   description: "AI-powered marketing analytics with real-time CDC streaming. Connect your data sources and get instant insights.",
   icons: {
-    icon: "/favicon.ico",
+    icon: "/favicon.svg",
   },
 };
 

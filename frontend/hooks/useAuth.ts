@@ -8,8 +8,8 @@ export function useAuth() {
   const { user, isLoading, isAuthenticated, setUser, setLoading, logout } = useAuthStore();
 
   useEffect(() => {
-    const unsubscribe = subscribeToAuthState((firebaseUser) => {
-      setUser(firebaseUser);
+    const unsubscribe = subscribeToAuthState((authUser) => {
+      setUser(authUser);
     });
 
     return () => unsubscribe();
@@ -17,11 +17,11 @@ export function useAuth() {
 
   const handleSignIn = async () => {
     try {
-      setLoading(true);
-      const user = await signInWithGoogle();
-      setUser(user);
+      // Don't set loading here - the page will redirect to Google OAuth
+      await signInWithGoogle();
     } catch (error) {
       console.error('Sign in failed:', error);
+      setLoading(false);
       throw error;
     }
   };

@@ -85,7 +85,7 @@ class DatabaseService:
 
     def _init_database(self):
         """Initialize SQLAlchemy connection"""
-        from sqlalchemy import create_engine
+        from sqlalchemy import create_engine, text
         from sqlalchemy.orm import sessionmaker
         from app.config import settings
         from app.db.models import Base
@@ -99,7 +99,7 @@ class DatabaseService:
 
         # Test connection
         with self._engine.connect() as conn:
-            conn.execute("SELECT 1")
+            conn.execute(text("SELECT 1"))
 
         self._SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self._engine)
 

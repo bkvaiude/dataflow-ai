@@ -28,9 +28,13 @@ class Settings(BaseSettings):
     google_client_id: str = ""
     google_client_secret: str = ""
     google_redirect_uri: str = "http://localhost:8000/api/oauth/google-ads/callback"
+    google_auth_redirect_uri: str = "http://localhost:8000/api/auth/google/callback"
 
     # Google Ads
     google_ads_developer_token: str = ""
+
+    # Google Sheets
+    google_sheets_credentials_path: str = ""
 
     @property
     def is_development(self) -> bool:

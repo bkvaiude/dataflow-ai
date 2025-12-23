@@ -3,7 +3,8 @@
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/hooks/useAuth';
-import { LogOut, Zap } from 'lucide-react';
+import { LogOut } from 'lucide-react';
+import { Logo } from '@/components/ui/Logo';
 
 export function Header() {
   const { user, signOut } = useAuth();
@@ -14,7 +15,7 @@ export function Header() {
         {/* Logo */}
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl gradient-ai flex items-center justify-center glow-ai">
-            <Zap className="w-5 h-5 text-white" />
+            <Logo className="w-5 h-5 text-white" />
           </div>
           <div>
             <h1 className="text-xl font-bold text-gradient">DataFlow AI</h1>

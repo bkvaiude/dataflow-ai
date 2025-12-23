@@ -3,7 +3,8 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import dynamic from 'next/dynamic';
-import { Zap, Database, BarChart3, Activity } from 'lucide-react';
+import { Database, BarChart3, Activity } from 'lucide-react';
+import { Logo } from '@/components/ui/Logo';
 import { useAuthStore } from '@/stores/authStore';
 
 // Dynamic imports for Firebase-dependent components
@@ -67,7 +68,7 @@ export default function HomePage() {
           {/* Logo */}
           <div className="flex items-center justify-center gap-3 mb-12">
             <div className="w-14 h-14 rounded-2xl gradient-ai flex items-center justify-center glow-ai">
-              <Zap className="w-7 h-7 text-white" />
+              <Logo className="w-7 h-7 text-white" />
             </div>
           </div>
 

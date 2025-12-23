@@ -37,3 +37,4 @@ logs/
 Thumbs.db
 
 ./creds/*
+.playwright-mcp/*
