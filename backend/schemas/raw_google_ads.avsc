@@ -1,0 +1,56 @@
+{
+  "type": "record",
+  "name": "RawGoogleAdsEvent",
+  "namespace": "ai.dataflow.ads",
+  "doc": "Raw campaign data from Google Ads API",
+  "fields": [
+    {
+      "name": "campaign_id",
+      "type": "string",
+      "doc": "Unique campaign identifier from Google Ads"
+    },
+    {
+      "name": "campaign_name",
+      "type": "string",
+      "doc": "Human-readable campaign name"
+    },
+    {
+      "name": "spend",
+      "type": "double",
+      "doc": "Total spend in USD (cost_micros / 1,000,000)"
+    },
+    {
+      "name": "clicks",
+      "type": "long",
+      "doc": "Total number of clicks"
+    },
+    {
+      "name": "impressions",
+      "type": "long",
+      "doc": "Total number of impressions"
+    },
+    {
+      "name": "conversions",
+      "type": "double",
+      "doc": "Total number of conversions"
+    },
+    {
+      "name": "conversion_value",
+      "type": "double",
+      "doc": "Total conversion value in USD"
+    },
+    {
+      "name": "user_id",
+      "type": "string",
+      "doc": "DataFlow user ID who owns this data"
+    },
+    {
+      "name": "event_time",
+      "type": {
+        "type": "long",
+        "logicalType": "timestamp-millis"
+      },
+      "doc": "Timestamp when this data was captured"
+    }
+  ]
+}

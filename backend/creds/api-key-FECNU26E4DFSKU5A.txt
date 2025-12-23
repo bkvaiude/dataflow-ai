@@ -1,0 +1,19 @@
+=== Confluent Cloud API key ===
+
+API key:
+FECNU26E4DFSKU5A
+
+API secret:
+cfltV7T+FSTSUvoTft3M/+YWK29yOY7ejtamUbpo+xqUJgCdh5FsqOq8pTM/UXfg
+
+Resource scope:
+Schema Registry
+
+Environment:
+env-gjvygm
+
+Resource:
+lsrc-vd859j
+
+Endpoint:
+https://psrc-ze7nwn5.us-east1.gcp.confluent.cloud

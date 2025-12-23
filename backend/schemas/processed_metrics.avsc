@@ -1,0 +1,79 @@
+{
+  "type": "record",
+  "name": "ProcessedMetrics",
+  "namespace": "ai.dataflow.metrics",
+  "doc": "Flink-processed marketing metrics with ROAS, CPC, CTR",
+  "fields": [
+    {
+      "name": "campaign_id",
+      "type": "string",
+      "doc": "Unique campaign identifier"
+    },
+    {
+      "name": "campaign_name",
+      "type": "string",
+      "doc": "Human-readable campaign name"
+    },
+    {
+      "name": "window_start",
+      "type": {
+        "type": "long",
+        "logicalType": "timestamp-millis"
+      },
+      "doc": "Start of aggregation window"
+    },
+    {
+      "name": "window_end",
+      "type": {
+        "type": "long",
+        "logicalType": "timestamp-millis"
+      },
+      "doc": "End of aggregation window"
+    },
+    {
+      "name": "total_spend",
+      "type": "double",
+      "doc": "Total spend in window (USD)"
+    },
+    {
+      "name": "total_clicks",
+      "type": "long",
+      "doc": "Total clicks in window"
+    },
+    {
+      "name": "total_impressions",
+      "type": "long",
+      "doc": "Total impressions in window"
+    },
+    {
+      "name": "total_conversions",
+      "type": "double",
+      "doc": "Total conversions in window"
+    },
+    {
+      "name": "total_revenue",
+      "type": "double",
+      "doc": "Total conversion value in window (USD)"
+    },
+    {
+      "name": "roas",
+      "type": "double",
+      "doc": "Return on Ad Spend = revenue / spend"
+    },
+    {
+      "name": "cpc",
+      "type": "double",
+      "doc": "Cost Per Click = spend / clicks"
+    },
+    {
+      "name": "ctr",
+      "type": "double",
+      "doc": "Click-Through Rate = (clicks / impressions) * 100"
+    },
+    {
+      "name": "user_id",
+      "type": "string",
+      "doc": "DataFlow user ID"
+    }
+  ]
+}
