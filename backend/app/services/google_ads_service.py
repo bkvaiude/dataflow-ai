@@ -44,8 +44,9 @@ class GoogleAdsService:
         self.is_mock = True
         self.client = None
 
-        if settings.is_development:
+        if settings.use_mock_google_ads:
             self.client = MockGoogleAdsService()
+            print("GoogleAdsService using mock (no developer token)")
         else:
             self._init_google_ads_client()
 

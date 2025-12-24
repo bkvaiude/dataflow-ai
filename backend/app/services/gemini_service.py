@@ -1,5 +1,5 @@
 """
-Gemini AI service using Google ADK (Agent Development Kit).
+Gemini AI service using LangChain + LangGraph.
 Provides a conversational AI agent with tools for data pipeline management.
 """
 
@@ -21,49 +21,53 @@ from app.tools.agent_tools import (
 
 class GeminiService:
     """
-    Gemini AI service for chat processing using Google ADK.
-    In development mode, uses mock responses.
-    In production, integrates with Google ADK Agent.
+    Gemini AI service for chat processing using LangChain + LangGraph.
+    Uses mock responses when no API key is configured.
+    Otherwise integrates with Gemini via LangChain.
     """
 
     def __init__(self):
         self.conversation_history: Dict[str, List[Dict]] = {}
+        self.llm = None
         self.agent = None
-        self.runner = None
 
-        if not settings.is_development and settings.google_api_key:
-            self._init_adk_agent()
+        # Use mock only when no API key is available
+        if settings.use_mock_gemini:
+            print("Running in mock mode (no Gemini API key configured)")
         else:
-            print("Running in mock mode (no Gemini API key or development mode)")
+            self._init_langchain_agent()
 
-    def _init_adk_agent(self):
-        """Initialize Google ADK Agent with Gemini"""
+    def _init_langchain_agent(self):
+        """Initialize LangChain Agent with Gemini using LangGraph"""
         try:
-            from google.adk.agents import Agent
-            from google.adk.runners import Runner
-            from google.genai import types
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            from langgraph.prebuilt import create_react_agent
 
-            # Create the ADK Agent
-            self.agent = Agent(
-                model='gemini-2.0-flash',
-                name='dataflow_agent',
-                description='Marketing analytics assistant that sets up real-time streaming data pipelines using Kafka and Flink.',
-                instruction=self._get_system_prompt(),
-                tools=get_all_tools(),
+            # Initialize the Gemini LLM
+            self.llm = ChatGoogleGenerativeAI(
+                model="gemini-2.0-flash",
+                google_api_key=settings.gemini_api_key,
+                temperature=0.7,
             )
 
-            # Create the Runner
-            self.runner = Runner(
-                agent=self.agent,
-                app_name='DataFlow AI'
+            # Get LangChain tools
+            tools = get_all_tools()
+
+            # Create the agent using LangGraph
+            self.agent = create_react_agent(
+                model=self.llm,
+                tools=tools,
+                prompt=self._get_system_prompt(),
             )
 
-            print("Google ADK Agent initialized with Gemini 2.0 Flash")
+            print("LangChain Agent initialized with Gemini 2.0 Flash")
 
         except Exception as e:
-            print(f"Failed to initialize Google ADK: {e}")
+            print(f"Failed to initialize LangChain Agent: {e}")
+            import traceback
+            traceback.print_exc()
+            self.llm = None
             self.agent = None
-            self.runner = None
 
     def _get_system_prompt(self) -> str:
         return """You are DataFlow AI, a marketing analytics assistant that sets up REAL-TIME streaming data pipelines.
@@ -112,11 +116,11 @@ You don't just pull data - you create enterprise-grade streaming infrastructure:
 
         history = self.conversation_history[user_id]
 
-        # In development mode or if agent not initialized, use smart mock responses
-        if settings.is_development or self.runner is None:
+        # Choose processing method based on agent availability
+        if self.agent is None:
             response = await self._mock_process(message, history)
         else:
-            response = await self._adk_process(message, user_id, history)
+            response = await self._langchain_process(message, user_id, history)
 
         # Update history
         history.append({"role": "user", "content": message})
@@ -127,21 +131,40 @@ You don't just pull data - you create enterprise-grade streaming infrastructure:
 
         return response
 
-    async def _adk_process(self, message: str, user_id: str, history: List[Dict]) -> Dict[str, Any]:
-        """Process message with Google ADK Agent"""
+    async def _langchain_process(
+        self, message: str, user_id: str, history: List[Dict]
+    ) -> Dict[str, Any]:
+        """Process message with LangGraph Agent"""
         try:
-            # Create a session for this user
-            session_id = f"session_{user_id}"
+            from langchain_core.messages import HumanMessage, AIMessage
 
-            # Run the agent
-            result = await self.runner.run_async(
-                user_id=user_id,
-                session_id=session_id,
-                new_message=message
-            )
+            # Convert history to LangChain message format
+            messages = []
+            for msg in history:
+                if msg["role"] == "user":
+                    messages.append(HumanMessage(content=msg["content"]))
+                else:
+                    messages.append(AIMessage(content=msg["content"]))
 
-            # Extract the response content
-            content = str(result) if result else "I'm sorry, I couldn't process that request."
+            # Add current message
+            messages.append(HumanMessage(content=message))
+
+            # Run the agent with messages
+            result = await self.agent.ainvoke({
+                "messages": messages,
+            })
+
+            # Extract the output from the last AI message
+            output_messages = result.get("messages", [])
+            content = "I'm sorry, I couldn't process that request."
+
+            for msg in reversed(output_messages):
+                if hasattr(msg, 'content') and msg.content:
+                    # Skip tool messages
+                    if hasattr(msg, 'type') and msg.type == 'tool':
+                        continue
+                    content = msg.content
+                    break
 
             # Extract actions from the response
             actions = self._extract_actions(content)
@@ -152,7 +175,9 @@ You don't just pull data - you create enterprise-grade streaming infrastructure:
             }
 
         except Exception as e:
-            print(f"ADK processing error: {e}")
+            print(f"LangChain processing error: {e}")
+            import traceback
+            traceback.print_exc()
             # Fall back to mock on error
             return await self._mock_process(message, history)
 

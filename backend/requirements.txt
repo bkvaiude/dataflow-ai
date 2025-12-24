@@ -1,14 +1,15 @@
 # Core
-fastapi==0.109.2
-uvicorn[standard]==0.27.1
-python-dotenv==1.0.1
-pydantic==2.6.1
-pydantic-settings==2.2.1
+fastapi>=0.109.2
+uvicorn[standard]>=0.27.1
+python-dotenv>=1.0.1
+pydantic>=2.7.4
+pydantic-settings>=2.3.0
 
 # AI/LangChain
-langchain==0.1.9
-langchain-google-genai==0.0.11
-langchain-core==0.1.27
+langchain>=0.3.0
+langchain-google-genai>=2.0.0
+langchain-core>=0.3.0
+langgraph>=0.2.0
 
 # Kafka
 confluent-kafka[avro]==2.3.0

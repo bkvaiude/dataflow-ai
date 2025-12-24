@@ -25,11 +25,9 @@ class SheetsService:
     """
 
     def __init__(self):
-        self.is_mock = settings.is_development
-        if self.is_mock:
-            print("MockSheetsService initialized (development mode)")
-        else:
-            print("SheetsService initialized (uses user OAuth tokens)")
+        # Sheets always uses user OAuth tokens, no service-level mock needed
+        self.is_mock = False
+        print("SheetsService initialized (uses user OAuth tokens)")
 
     def _get_client_for_user(self, tokens: Dict[str, Any]):
         """Create gspread client using user's OAuth tokens"""
@@ -59,9 +57,14 @@ class SheetsService:
     ) -> str:
         """Create a marketing dashboard in user's Google Drive"""
 
-        # Mock mode or no tokens - return demo URL
-        if self.is_mock or not tokens:
-            print(f"[MOCK SHEETS] Creating dashboard for {user_id}")
+        # No tokens - return demo URL
+        if not tokens:
+            print(f"[SHEETS] No tokens available, returning demo dashboard for {user_id}")
+            return "https://docs.google.com/spreadsheets/d/demo-dashboard"
+
+        access_token = tokens.get("access_token", "")
+        if not access_token:
+            print(f"[SHEETS] No access token, returning demo dashboard for {user_id}")
             return "https://docs.google.com/spreadsheets/d/demo-dashboard"
 
         client = self._get_client_for_user(tokens)

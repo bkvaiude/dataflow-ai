@@ -45,7 +45,7 @@ class KafkaConsumerService:
         self.avro_deserializer = None
         self.schema_registry_client = None
 
-        if settings.is_development or not settings.kafka_bootstrap_servers:
+        if settings.use_mock_kafka:
             self.consumer = MockKafkaConsumer()
         else:
             self._init_confluent_consumer()

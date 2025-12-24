@@ -61,15 +61,13 @@ async def google_login():
     if not settings.google_client_id:
         raise HTTPException(status_code=500, detail="Google OAuth not configured")
 
-    # For development mode, return mock login
-    if settings.is_development and not settings.google_client_id:
-        return {"auth_url": "/api/auth/google/callback?code=mock"}
-
-    # Scopes for user profile
+    # Scopes for user profile + Drive access for dashboards
     scopes = [
         "openid",
         "email",
         "profile",
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/spreadsheets",
     ]
     scope = " ".join(scopes)
 
@@ -112,20 +110,6 @@ async def google_callback(
     if not code:
         return RedirectResponse(url=f"{frontend_url}/?error=no_code")
 
-    # Development mode mock
-    if settings.is_development and code == "mock":
-        user_data = {
-            "id": "demo-user-123",
-            "email": "demo@dataflow.ai",
-            "name": "Demo User",
-            "picture": None,
-        }
-        # Save user to database
-        db_service.create_user(user_data["id"], user_data)
-        session_id = create_session(user_data)
-
-        # Redirect to frontend with session token in URL
-        return RedirectResponse(url=f"{frontend_url}/auth/callback?session={session_id}")
 
     try:
         # Exchange code for tokens
@@ -163,18 +147,23 @@ async def google_callback(
 
             userinfo = userinfo_response.json()
 
-        # Create user data
+        # Create user data with tokens for Sheets/Drive access
         user_data = {
             "id": userinfo["id"],
             "email": userinfo.get("email", ""),
             "name": userinfo.get("name"),
             "picture": userinfo.get("picture"),
+            "tokens": {
+                "access_token": tokens.get("access_token"),
+                "refresh_token": tokens.get("refresh_token"),
+                "expires_in": tokens.get("expires_in"),
+            }
         }
 
         # Save user to database
         db_service.create_user(user_data["id"], user_data)
 
-        # Create session
+        # Create session (store tokens for Sheets access)
         session_id = create_session(user_data)
 
         # Redirect to frontend with session token in URL
@@ -223,4 +212,19 @@ async def get_current_user(session: Optional[str] = Query(None)):
     if not user_data:
         raise HTTPException(status_code=401, detail="Session expired")
 
-    return user_data
+    # Don't expose tokens to frontend
+    return {
+        "id": user_data.get("id"),
+        "email": user_data.get("email"),
+        "name": user_data.get("name"),
+        "picture": user_data.get("picture"),
+    }
+
+
+def get_user_tokens(user_id: str) -> Optional[dict]:
+    """Get user's OAuth tokens for Sheets/Drive access"""
+    # Check all sessions for this user
+    for session_data in sessions.values():
+        if session_data.get("id") == user_id:
+            return session_data.get("tokens")
+    return None

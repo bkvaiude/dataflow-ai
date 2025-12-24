@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from app.config import settings
 from app.api.routes import router
 from app.services.gemini_service import GeminiService
+from app.services.metrics_processor import metrics_processor
 
 # Socket.IO server
 sio = socketio.AsyncServer(
@@ -18,10 +19,23 @@ sio = socketio.AsyncServer(
 async def lifespan(app: FastAPI):
     # Startup
     print(f"Starting DataFlow AI API in {settings.environment} mode...")
+    print(f"  - Gemini: {'REAL' if settings.has_gemini_api_key else 'MOCK'}")
+    print(f"  - Kafka: {'REAL' if settings.has_kafka_credentials else 'MOCK'}")
+    print(f"  - OAuth: {'REAL' if settings.has_google_oauth_credentials else 'MOCK'}")
+    print(f"  - Google Ads Data: {'REAL' if settings.has_google_ads_developer_token else 'MOCK (no developer token)'}")
+
     app.state.gemini = GeminiService()
+
+    # Start metrics processor if Kafka is configured
+    if settings.has_kafka_credentials:
+        metrics_processor.start()
+        print("  - Metrics Processor: STARTED")
+
     yield
+
     # Shutdown
     print("Shutting down DataFlow AI API...")
+    metrics_processor.stop()
 
 
 app = FastAPI(

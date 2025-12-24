@@ -43,7 +43,7 @@ class KafkaProducerService:
         self.avro_serializer = None
         self.schema_registry_client = None
 
-        if settings.is_development or not settings.kafka_bootstrap_servers:
+        if settings.use_mock_kafka:
             self.producer = MockKafkaProducer()
         else:
             self._init_confluent_producer()

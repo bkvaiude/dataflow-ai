@@ -1,21 +1,23 @@
 """
-Google ADK tools for the DataFlow AI agent.
+LangChain tools for the DataFlow AI agent.
 These tools enable the AI to interact with connectors, Kafka, and dashboards.
 
-Tools are simple Python functions with type hints and docstrings that Google ADK
-automatically converts to callable agent tools.
+Tools use LangChain's @tool decorator for automatic schema generation.
 """
 
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 import json
+from langchain_core.tools import tool
 
-# Mock data for development
+# Mock data for development (realistic Google Ads campaign data)
 MOCK_CAMPAIGNS = [
     {
         "campaign_id": "123",
         "name": "Summer Sale",
         "spend": 5000,
+        "clicks": 6024,
+        "impressions": 143428,
         "conversions": 250,
         "conversion_value": 26000
     },
@@ -23,6 +25,8 @@ MOCK_CAMPAIGNS = [
         "campaign_id": "456",
         "name": "Brand Awareness",
         "spend": 2000,
+        "clicks": 1667,
+        "impressions": 92611,
         "conversions": 40,
         "conversion_value": 1600
     },
@@ -30,6 +34,8 @@ MOCK_CAMPAIGNS = [
         "campaign_id": "789",
         "name": "Retargeting",
         "spend": 8420,
+        "clicks": 12954,
+        "impressions": 254000,
         "conversions": 421,
         "conversion_value": 34550
     },
@@ -74,6 +80,7 @@ def get_user_context() -> str:
     return _current_user_id
 
 
+@tool
 def list_available_connectors() -> str:
     """List all available data source connectors.
 
@@ -91,6 +98,7 @@ def list_available_connectors() -> str:
     return json.dumps(connectors, indent=2)
 
 
+@tool
 def check_connector_status(provider: str) -> str:
     """Check if a specific data source is connected for the current user.
 
@@ -127,6 +135,7 @@ def check_connector_status(provider: str) -> str:
     return json.dumps(result, indent=2)
 
 
+@tool
 def initiate_oauth(provider: str) -> str:
     """Start OAuth authorization flow for a data source.
 
@@ -157,6 +166,7 @@ def initiate_oauth(provider: str) -> str:
     return json.dumps(result, indent=2)
 
 
+@tool
 def create_kafka_pipeline(connector_id: str, customer_id: str = "") -> str:
     """Create a real-time Kafka streaming pipeline for a connected data source.
 
@@ -234,6 +244,7 @@ def create_kafka_pipeline(connector_id: str, customer_id: str = "") -> str:
     return json.dumps(result, indent=2)
 
 
+@tool
 def generate_dashboard(use_real_data: bool = True) -> str:
     """Generate a Google Sheets dashboard from processed Kafka data.
 
@@ -249,7 +260,6 @@ def generate_dashboard(use_real_data: bool = True) -> str:
     """
     from app.services.kafka_consumer import kafka_consumer
     from app.services.sheets_service import sheets_service
-    from app.services.firebase_service import firebase_service
 
     user_id = get_user_context()
 
@@ -271,9 +281,9 @@ def generate_dashboard(use_real_data: bool = True) -> str:
         if worst.get('roas', 0) < 1:
             warning = f"'{worst.get('campaign_name', worst.get('name', 'Unknown'))}' is losing money at {worst.get('roas', 0):.1f}x ROAS - consider pausing."
 
-        # Get user's OAuth tokens for Sheets access
-        connector = firebase_service.get_connector(user_id, "google_ads")
-        tokens = connector.get("tokens") if connector else None
+        # Get user's OAuth tokens for Sheets access (from login, not Google Ads)
+        from app.api.auth import get_user_tokens
+        tokens = get_user_tokens(user_id)
 
         # Create dashboard in user's Google Drive
         try:
@@ -308,7 +318,7 @@ def generate_dashboard(use_real_data: bool = True) -> str:
 
 
 def get_all_tools() -> list:
-    """Get all tools as a list for the Google ADK agent."""
+    """Get all LangChain tools for the agent."""
     return [
         list_available_connectors,
         check_connector_status,

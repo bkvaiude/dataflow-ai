@@ -100,20 +100,14 @@ async def init_oauth(provider: str, user_id: str = Query(default="demo")):
         raise HTTPException(status_code=400, detail=f"Provider {provider} not supported")
 
     if provider == 'google-ads':
-        if settings.is_development:
-            # Mock OAuth URL for development
-            state = encode_state(user_id, provider)
+        state = encode_state(user_id, provider)
+
+        if settings.use_mock_oauth:
+            # Mock OAuth URL when no credentials configured
             auth_url = f"http://localhost:8000/api/oauth/{provider}/callback?code=mock_code&state={state}"
         else:
-            # Real OAuth URL with state containing user_id
-            state = encode_state(user_id, provider)
-            # Include Sheets/Drive scopes for dashboard creation
-            scopes = [
-                "https://www.googleapis.com/auth/adwords",
-                "https://www.googleapis.com/auth/spreadsheets",
-                "https://www.googleapis.com/auth/drive.file",
-            ]
-            scope = " ".join(scopes)
+            # Real OAuth URL - only request Google Ads scope
+            scope = "https://www.googleapis.com/auth/adwords"
             auth_url = (
                 f"https://accounts.google.com/o/oauth2/v2/auth?"
                 f"client_id={settings.google_client_id}&"
@@ -219,8 +213,8 @@ async def oauth_callback(
     user_id = state_data.get("user_id", "demo")
 
     if provider == 'google-ads':
-        if settings.is_development:
-            # Mock successful OAuth - store mock tokens
+        if settings.use_mock_oauth:
+            # Mock successful OAuth - store mock tokens (only when no OAuth credentials)
             mock_tokens = {
                 "access_token": "mock_access_token_12345",
                 "refresh_token": "mock_refresh_token_67890",
@@ -229,7 +223,7 @@ async def oauth_callback(
                 "scope": "https://www.googleapis.com/auth/adwords"
             }
             firebase_service.save_connector(user_id, "google_ads", mock_tokens)
-            return callback_html(True, "Successfully connected to Google Ads", provider)
+            return callback_html(True, "Successfully connected to Google Ads (Mock)", provider)
 
         try:
             # Exchange code for tokens

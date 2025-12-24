@@ -45,9 +45,10 @@ export const checkConnectorStatus = async (
 };
 
 export const initiateOAuth = async (
-  provider: string
+  provider: string,
+  userId: string
 ): Promise<ApiResponse<OAuthInitResponse>> => {
-  return fetchWithAuth<OAuthInitResponse>(`/api/oauth/${provider}/init`, {
+  return fetchWithAuth<OAuthInitResponse>(`/api/oauth/${provider}/init/?user_id=${encodeURIComponent(userId)}`, {
     method: 'POST',
   });
 };
