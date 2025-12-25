@@ -139,7 +139,11 @@ export function CredentialList({
         return (
           <div
             key={credential.id}
+            role="button"
+            tabIndex={0}
+            data-testid={`credential-card-${credential.id}`}
             onClick={() => onSelect(credential)}
+            onKeyDown={(e) => e.key === 'Enter' && onSelect(credential)}
             className={`
               group relative p-4 rounded-xl border cursor-pointer transition-all duration-200
               ${isSelected

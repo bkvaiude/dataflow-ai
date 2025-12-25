@@ -67,7 +67,6 @@ async def google_login():
         "email",
         "profile",
         "https://www.googleapis.com/auth/drive.file",
-        "https://www.googleapis.com/auth/spreadsheets",
     ]
     scope = " ".join(scopes)
 

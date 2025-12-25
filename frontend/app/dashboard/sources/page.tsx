@@ -11,6 +11,7 @@ import type {
   CredentialFormData,
   SchemaDiscoveryResult,
   CDCReadinessResult,
+  DiscoveredTable,
 } from '@/types';
 import {
   Database,
@@ -24,7 +25,14 @@ import {
 import { useAuthStore } from '@/stores/authStore';
 
 export default function SourcesPage() {
-  const { user, token } = useAuthStore();
+  const { user } = useAuthStore();
+  const [session, setSession] = useState<string | null>(null);
+
+  // Get session from localStorage on mount
+  useEffect(() => {
+    const storedSession = localStorage.getItem('session');
+    setSession(storedSession);
+  }, []);
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [selectedCredential, setSelectedCredential] = useState<Credential | null>(null);
   const [isFormOpen, setIsFormOpen] = useState(false);
@@ -40,22 +48,31 @@ export default function SourcesPage() {
 
   // Fetch credentials on mount
   useEffect(() => {
-    if (user && token) {
+    if (user && session) {
       fetchCredentials();
     }
-  }, [user, token]);
+  }, [user, session]);
 
   const fetchCredentials = async () => {
+    if (!session) return;
     setIsLoadingCredentials(true);
     try {
-      const response = await fetch(`${API_URL}/api/credentials`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
+      const response = await fetch(`${API_URL}/api/credentials/?session=${session}`);
       if (response.ok) {
         const data = await response.json();
-        setCredentials(data.credentials || []);
+        // Transform snake_case API response to camelCase
+        const transformed = (data || []).map((cred: Record<string, unknown>) => ({
+          id: cred.id,
+          name: cred.name,
+          sourceType: cred.source_type,
+          host: cred.host,
+          database: cred.database,
+          port: cred.port,
+          isValid: cred.is_valid,
+          lastValidatedAt: cred.last_validated_at,
+          createdAt: cred.created_at,
+        }));
+        setCredentials(transformed);
       }
     } catch (error) {
       console.error('Failed to fetch credentials:', error);
@@ -65,12 +82,12 @@ export default function SourcesPage() {
   };
 
   const handleCreateCredential = async (formData: CredentialFormData): Promise<{ success: boolean; message: string }> => {
+    if (!session) return { success: false, message: 'Not authenticated' };
     try {
-      const response = await fetch(`${API_URL}/api/credentials`, {
+      const response = await fetch(`${API_URL}/api/credentials/?session=${session}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
           name: formData.name,
@@ -99,12 +116,10 @@ export default function SourcesPage() {
   };
 
   const handleDeleteCredential = async (id: string): Promise<void> => {
+    if (!session) return;
     try {
-      const response = await fetch(`${API_URL}/api/credentials/${id}`, {
+      const response = await fetch(`${API_URL}/api/credentials/${id}?session=${session}`, {
         method: 'DELETE',
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
       });
 
       if (response.ok) {
@@ -121,19 +136,17 @@ export default function SourcesPage() {
   };
 
   const handleTestCredential = async (id: string): Promise<{ success: boolean; latencyMs?: number }> => {
+    if (!session) return { success: false };
     try {
       const startTime = Date.now();
-      const response = await fetch(`${API_URL}/api/credentials/${id}/test`, {
+      const response = await fetch(`${API_URL}/api/credentials/${id}/test?session=${session}`, {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
       });
 
       const latencyMs = Date.now() - startTime;
       const data = await response.json();
 
-      if (response.ok && data.is_valid) {
+      if (response.ok && data.success) {
         await fetchCredentials();
         return { success: true, latencyMs };
       } else {
@@ -146,15 +159,14 @@ export default function SourcesPage() {
   };
 
   const handleDiscoverSchema = useCallback(async () => {
-    if (!selectedCredential) return;
+    if (!selectedCredential || !session) return;
 
     setIsDiscoveringSchema(true);
     try {
-      const response = await fetch(`${API_URL}/api/sources/discover`, {
+      const response = await fetch(`${API_URL}/api/sources/discover?session=${session}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
           credential_id: selectedCredential.id,
@@ -165,7 +177,47 @@ export default function SourcesPage() {
 
       if (response.ok) {
         const data = await response.json();
-        setSchema(data);
+        // Transform tables from snake_case to camelCase
+        const transformedTables = (data.tables || []).map((t: Record<string, unknown>) => ({
+          tableName: t.table_name,
+          schemaName: t.schema_name || data.schema_name,
+          columns: ((t.columns as Array<Record<string, unknown>>) || []).map((c) => ({
+            name: c.column_name,
+            type: c.data_type,
+            nullable: c.is_nullable !== false,
+            default: c.column_default,
+            isPk: ((t.primary_keys as string[]) || []).includes(c.column_name as string),
+          })),
+          primaryKeys: t.primary_keys || [],
+          foreignKeys: ((t.foreign_keys as Array<Record<string, unknown>>) || []).map((fk) => ({
+            columns: [fk.column_name],
+            refTable: `${fk.foreign_table_schema}.${fk.foreign_table_name}`,
+            refColumns: [fk.foreign_column_name],
+          })),
+          rowCountEstimate: t.row_count_estimate as number | undefined,
+          tableSizeBytes: t.table_size_bytes as number | undefined,
+          hasPrimaryKey: t.has_primary_key as boolean,
+          cdcEligible: t.cdc_eligible as boolean,
+          cdcIssues: (t.cdc_issues as string[]) || [],
+          replicaIdentity: t.replica_identity as string | undefined,
+        }));
+
+        // Transform response to match SchemaDiscoveryResult type
+        const schemaResult: SchemaDiscoveryResult = {
+          credentialId: data.credential_id,
+          discoveredAt: data.discovered_at,
+          schemas: [{
+            schemaName: data.schema_name,
+            tables: transformedTables,
+          }],
+          relationshipGraph: data.relationship_graph,
+          summary: {
+            totalTables: data.table_count,
+            cdcEligibleTables: transformedTables.filter((t: DiscoveredTable) => t.cdcEligible).length,
+            tablesWithoutPk: transformedTables.filter((t: DiscoveredTable) => !t.hasPrimaryKey).length,
+          },
+        };
+        setSchema(schemaResult);
       } else {
         console.error('Schema discovery failed');
       }
@@ -174,18 +226,17 @@ export default function SourcesPage() {
     } finally {
       setIsDiscoveringSchema(false);
     }
-  }, [selectedCredential, token, API_URL]);
+  }, [selectedCredential, session, API_URL]);
 
   const handleCheckReadiness = useCallback(async () => {
-    if (!selectedCredential) return;
+    if (!selectedCredential || !session) return;
 
     setIsCheckingReadiness(true);
     try {
-      const response = await fetch(`${API_URL}/api/sources/check-readiness`, {
+      const response = await fetch(`${API_URL}/api/sources/check-readiness?session=${session}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
           credential_id: selectedCredential.id,
@@ -194,7 +245,32 @@ export default function SourcesPage() {
 
       if (response.ok) {
         const data = await response.json();
-        setCdcReadiness(data);
+        // Transform response to match CDCReadinessResult type
+        const readinessResult: CDCReadinessResult = {
+          credentialId: selectedCredential.id,
+          checkedAt: data.checked_at,
+          overallReady: data.overall_ready,
+          server: {
+            version: data.server_version,
+            provider: data.provider,
+            providerDetected: true,
+          },
+          checks: data.checks,
+          tableReadiness: data.table_checks?.map((t: { table: string; ready: boolean; has_primary_key: boolean; has_replica_identity: boolean; replica_identity?: string; fix?: string }) => ({
+            table: t.table,
+            ready: t.ready,
+            hasPrimaryKey: t.has_primary_key,
+            hasReplicaIdentity: t.has_replica_identity,
+            replicaIdentity: t.replica_identity,
+            fix: t.fix,
+          })) || [],
+          recommendedActions: data.recommendations?.map((r: { priority: string; action: string; provider_specific: boolean }) => ({
+            priority: r.priority as 'high' | 'medium' | 'low',
+            action: r.action,
+            providerSpecific: r.provider_specific,
+          })) || [],
+        };
+        setCdcReadiness(readinessResult);
       } else {
         console.error('CDC readiness check failed');
       }
@@ -203,7 +279,7 @@ export default function SourcesPage() {
     } finally {
       setIsCheckingReadiness(false);
     }
-  }, [selectedCredential, token, API_URL]);
+  }, [selectedCredential, session, API_URL]);
 
   const handleSelectCredential = (credential: Credential) => {
     setSelectedCredential(credential);

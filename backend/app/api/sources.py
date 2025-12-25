@@ -80,15 +80,22 @@ class CDCReadinessResponse(BaseModel):
     checked_at: str
 
 
-# Dependency to get user_id (mock for now, replace with real auth)
-async def get_current_user_id() -> str:
+# Dependency to get user_id from session
+from fastapi import Query
+from app.api.auth import get_session
+
+async def get_current_user_id(session: str = Query(None)) -> str:
     """
-    Get current authenticated user ID.
-    TODO: Replace with real authentication
+    Get current authenticated user ID from session.
     """
-    # For development, return a test user ID
-    # In production, this should extract user_id from JWT token
-    return "test-user-id"
+    if not session:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    user_data = get_session(session)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid session")
+
+    return user_data["id"]
 
 
 @router.post("/discover", response_model=SchemaDiscoveryResponse)
