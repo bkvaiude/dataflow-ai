@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     # Google Sheets
     google_sheets_credentials_path: str = ""
 
+    # Credential Encryption
+    credential_encryption_key: str = ""
+
     @property
     def is_development(self) -> bool:
         return self.environment == "development"

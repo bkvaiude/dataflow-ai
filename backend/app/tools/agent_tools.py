@@ -167,7 +167,7 @@ def initiate_oauth(provider: str) -> str:
 
 
 @tool
-def create_kafka_pipeline(connector_id: str, customer_id: str = "") -> str:
+def create_kafka_pipeline(connector_id: str, customer_id: str = "", force_reprocess: bool = False) -> str:
     """Create a real-time Kafka streaming pipeline for a connected data source.
 
     Use this tool after a user has successfully connected a data source.
@@ -176,13 +176,16 @@ def create_kafka_pipeline(connector_id: str, customer_id: str = "") -> str:
     Args:
         connector_id: The ID of the connected source (e.g., 'google_ads').
         customer_id: Optional Google Ads customer ID (e.g., '123-456-7890').
+        force_reprocess: If True, skip duplicate check and force reprocessing.
 
     Returns:
         JSON string with pipeline status, Kafka topic name, and next steps.
+        May return a confirm_reprocess action if data was already processed.
     """
     from app.services.firebase_service import firebase_service
     from app.services.kafka_producer import kafka_producer
     from app.services.google_ads_service import google_ads_service
+    from app.services.processing_tracker import processing_tracker
 
     user_id = get_user_context()
     provider_key = connector_id.replace("-", "_")
@@ -198,6 +201,32 @@ def create_kafka_pipeline(connector_id: str, customer_id: str = "") -> str:
             "action_required": True
         }, indent=2)
 
+    # Check for duplicate processing (unless force_reprocess is True)
+    if not force_reprocess:
+        is_processed, processed_at, metadata = processing_tracker.is_already_processed(
+            user_id=user_id,
+            connector_id=provider_key,
+            customer_id=customer_id or "default"
+        )
+
+        if is_processed and processed_at:
+            time_ago = processing_tracker.get_time_since_processed(processed_at)
+            campaigns_count = metadata.get("campaigns_count", 0) if metadata else 0
+
+            return json.dumps({
+                "status": "already_processed",
+                "message": f"This data was already processed {time_ago} ({campaigns_count} campaigns). Do you want to reprocess it? This may create duplicates in your pipeline.",
+                "processed_at": processed_at.isoformat(),
+                "campaigns_count": campaigns_count,
+                "action_required": True,
+                "action_type": "confirm_reprocess",
+                "confirmation_data": {
+                    "connector_id": connector_id,
+                    "customer_id": customer_id,
+                    "user_id": user_id
+                }
+            }, indent=2)
+
     if provider_key == "google_ads":
         tokens = connector.get("tokens", {})
 
@@ -209,14 +238,24 @@ def create_kafka_pipeline(connector_id: str, customer_id: str = "") -> str:
                 kafka_producer.produce_google_ads_data(campaign, user_id=user_id)
             kafka_producer.flush()
 
+            # Mark as processed
+            processing_tracker.mark_as_processed(
+                user_id=user_id,
+                connector_id=provider_key,
+                customer_id=customer_id or "default",
+                campaigns_count=len(campaigns),
+                reprocessed=force_reprocess
+            )
+
             result = {
                 "status": "streaming",
                 "mode": "mock",
                 "topic": topic,
                 "campaigns_streamed": len(campaigns),
                 "pipeline": f"Google Ads → Kafka ({topic}) → Flink → processed_metrics",
-                "message": f"Mock pipeline created! Streamed {len(campaigns)} demo campaigns to Kafka.",
-                "next_step": "Use generate_dashboard to create your analytics dashboard."
+                "message": f"{'Reprocessed' if force_reprocess else 'Pipeline created'}! Streamed {len(campaigns)} demo campaigns to Kafka.",
+                "next_step": "Use generate_dashboard to create your analytics dashboard.",
+                "reprocessed": force_reprocess
             }
         else:
             # Production mode: use real API
@@ -226,6 +265,16 @@ def create_kafka_pipeline(connector_id: str, customer_id: str = "") -> str:
                 user_id=user_id
             )
 
+            if stream_result["success"]:
+                # Mark as processed
+                processing_tracker.mark_as_processed(
+                    user_id=user_id,
+                    connector_id=provider_key,
+                    customer_id=customer_id or "default",
+                    campaigns_count=stream_result.get("count", 0),
+                    reprocessed=force_reprocess
+                )
+
             result = {
                 "status": "streaming" if stream_result["success"] else "error",
                 "mode": "production",
@@ -233,7 +282,8 @@ def create_kafka_pipeline(connector_id: str, customer_id: str = "") -> str:
                 "campaigns_streamed": stream_result.get("count", 0),
                 "pipeline": f"Google Ads API → Kafka ({topic}) → Flink → processed_metrics",
                 "message": stream_result["message"],
-                "next_step": "Use generate_dashboard to create your analytics dashboard."
+                "next_step": "Use generate_dashboard to create your analytics dashboard.",
+                "reprocessed": force_reprocess
             }
     else:
         result = {
@@ -242,6 +292,255 @@ def create_kafka_pipeline(connector_id: str, customer_id: str = "") -> str:
         }
 
     return json.dumps(result, indent=2)
+
+
+@tool
+def store_credentials(
+    name: str,
+    source_type: str,
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+    test_connection: bool = True
+) -> str:
+    """Store encrypted database credentials for CDC pipeline setup.
+
+    Use this tool when the user wants to connect a database for CDC streaming.
+    This securely stores credentials using AES-256-GCM encryption.
+
+    Args:
+        name: Friendly name for this connection (e.g., "Production DB")
+        source_type: Database type - currently only 'postgresql' supported
+        host: Database hostname or IP
+        port: Database port (default 5432 for PostgreSQL)
+        database: Database name
+        username: Database username with replication privileges
+        password: Database password
+        test_connection: Whether to test before saving (default True)
+
+    Returns:
+        JSON with credential ID and validation status
+    """
+    from app.services.credential_service import credential_service
+
+    user_id = get_user_context()
+
+    try:
+        credentials_dict = {
+            'host': host,
+            'port': port,
+            'database': database,
+            'username': username,
+            'password': password
+        }
+
+        result = credential_service.store_credentials(
+            user_id=user_id,
+            name=name,
+            source_type=source_type,
+            credentials=credentials_dict,
+            test_connection=test_connection
+        )
+
+        response = {
+            "status": "success",
+            "message": f"Credentials '{name}' stored successfully",
+            "credential_id": result['id'],
+            "is_valid": result['is_valid'],
+            "host": result['host'],
+            "database": result['database'],
+            "next_step": "Use discover_schema to explore available tables"
+        }
+
+        return json.dumps(response, indent=2)
+
+    except ValueError as e:
+        return json.dumps({
+            "status": "error",
+            "message": str(e),
+            "error_type": "connection_failed"
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({
+            "status": "error",
+            "message": f"Failed to store credentials: {str(e)}"
+        }, indent=2)
+
+
+@tool
+def discover_schema(
+    credential_id: str = "",
+    credential_name: str = "",
+    schema_filter: str = "public",
+    include_row_counts: bool = False
+) -> str:
+    """Discover database schema from a connected PostgreSQL source.
+
+    Use this to explore tables, columns, relationships, and identify CDC-eligible tables.
+
+    Args:
+        credential_id: ID of stored credentials
+        credential_name: Friendly name of credentials (alternative to ID)
+        schema_filter: Database schema to discover (default 'public')
+        include_row_counts: Whether to estimate row counts
+
+    Returns:
+        JSON with tables, columns, relationships, CDC eligibility
+    """
+    from app.services.schema_discovery_service import schema_discovery_service
+    from app.services.credential_service import credential_service
+
+    user_id = get_user_context()
+
+    try:
+        # Resolve credential_id from name if needed
+        if credential_name and not credential_id:
+            credentials = credential_service.list_credentials(user_id)
+            matching = [c for c in credentials if c['name'] == credential_name]
+            if not matching:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"No credential found with name '{credential_name}'"
+                }, indent=2)
+            credential_id = matching[0]['id']
+
+        if not credential_id:
+            return json.dumps({
+                "status": "error",
+                "message": "Either credential_id or credential_name is required"
+            }, indent=2)
+
+        # Discover schema
+        result = schema_discovery_service.discover(
+            user_id=user_id,
+            credential_id=credential_id,
+            schema_filter=schema_filter,
+            include_row_counts=include_row_counts
+        )
+
+        # Format response for better readability
+        cdc_eligible_tables = [t for t in result['tables'] if t['cdc_eligible']]
+        tables_with_issues = [t for t in result['tables'] if not t['cdc_eligible']]
+
+        response = {
+            "status": "success",
+            "schema": schema_filter,
+            "total_tables": result['table_count'],
+            "cdc_eligible_tables": len(cdc_eligible_tables),
+            "tables": result['tables'],
+            "relationship_graph": result['relationship_graph'],
+            "summary": {
+                "ready_for_cdc": [f"{t['schema_name']}.{t['table_name']}" for t in cdc_eligible_tables],
+                "needs_attention": [
+                    {
+                        "table": f"{t['schema_name']}.{t['table_name']}",
+                        "issues": t['cdc_issues']
+                    } for t in tables_with_issues
+                ]
+            },
+            "next_step": "Use check_cdc_readiness to validate database configuration"
+        }
+
+        return json.dumps(response, indent=2)
+
+    except ValueError as e:
+        return json.dumps({
+            "status": "error",
+            "message": str(e)
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({
+            "status": "error",
+            "message": f"Schema discovery failed: {str(e)}"
+        }, indent=2)
+
+
+@tool
+def check_cdc_readiness(
+    credential_id: str = "",
+    credential_name: str = "",
+    tables: str = ""
+) -> str:
+    """Check if a PostgreSQL database is ready for Change Data Capture.
+
+    Validates wal_level, replication privileges, and provides fix instructions.
+
+    Args:
+        credential_id: ID of stored credentials
+        credential_name: Friendly name of credentials
+        tables: Comma-separated table names to check (e.g., "public.users,public.orders")
+
+    Returns:
+        JSON with readiness status, issues, and provider-specific fix instructions
+    """
+    from app.services.cdc_readiness_service import cdc_readiness_service
+    from app.services.credential_service import credential_service
+
+    user_id = get_user_context()
+
+    try:
+        # Resolve credential_id from name if needed
+        if credential_name and not credential_id:
+            credentials = credential_service.list_credentials(user_id)
+            matching = [c for c in credentials if c['name'] == credential_name]
+            if not matching:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"No credential found with name '{credential_name}'"
+                }, indent=2)
+            credential_id = matching[0]['id']
+
+        if not credential_id:
+            return json.dumps({
+                "status": "error",
+                "message": "Either credential_id or credential_name is required"
+            }, indent=2)
+
+        # Parse tables list
+        table_list = None
+        if tables:
+            table_list = [t.strip() for t in tables.split(',') if t.strip()]
+
+        # Check readiness
+        result = cdc_readiness_service.check_readiness(
+            user_id=user_id,
+            credential_id=credential_id,
+            tables=table_list
+        )
+
+        # Format response
+        response = {
+            "status": "ready" if result['overall_ready'] else "not_ready",
+            "provider": result['provider_name'],
+            "server_version": result['server_version'],
+            "overall_ready": result['overall_ready'],
+            "checks": result['checks'],
+            "table_checks": result['table_checks'],
+            "recommendations": result['recommendations']
+        }
+
+        if result['overall_ready']:
+            response['message'] = "Database is ready for CDC! All prerequisites are met."
+            response['next_step'] = "You can now set up CDC pipelines for your tables"
+        else:
+            critical_issues = [r for r in result['recommendations'] if r['priority'] == 'critical']
+            response['message'] = f"Database is NOT ready for CDC. Found {len(critical_issues)} critical issue(s)."
+            response['next_step'] = "Follow the recommendations to fix issues, then check readiness again"
+
+        return json.dumps(response, indent=2)
+
+    except ValueError as e:
+        return json.dumps({
+            "status": "error",
+            "message": str(e)
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({
+            "status": "error",
+            "message": f"CDC readiness check failed: {str(e)}"
+        }, indent=2)
 
 
 @tool
@@ -324,7 +623,10 @@ def get_all_tools() -> list:
         check_connector_status,
         initiate_oauth,
         create_kafka_pipeline,
-        generate_dashboard
+        generate_dashboard,
+        store_credentials,
+        discover_schema,
+        check_cdc_readiness
     ]
 
 

@@ -1,5 +1,7 @@
 'use client';
 
+import { usePathname } from 'next/navigation';
+import Link from 'next/link';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { useChatStore } from '@/stores/chatStore';
@@ -20,7 +22,15 @@ const connectors = [
 ];
 
 export function Sidebar() {
+  const pathname = usePathname();
   const { connectedProviders, clearMessages } = useChatStore();
+
+  const isActive = (path: string) => {
+    if (path === '/dashboard') {
+      return pathname === '/dashboard';
+    }
+    return pathname.startsWith(path);
+  };
 
   return (
     <aside className="w-64 border-r border-border bg-sidebar flex flex-col">
@@ -31,13 +41,19 @@ export function Sidebar() {
             Navigation
           </h3>
           <div className="space-y-1">
-            <Button
-              variant="ghost"
-              className="w-full justify-start text-foreground bg-sidebar-accent"
-            >
-              <MessageSquare className="w-4 h-4 mr-3" />
-              Chat
-            </Button>
+            <Link href="/dashboard">
+              <Button
+                variant="ghost"
+                className={`w-full justify-start ${
+                  isActive('/dashboard') && !isActive('/dashboard/sources')
+                    ? 'text-foreground bg-sidebar-accent'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                <MessageSquare className="w-4 h-4 mr-3" />
+                Chat
+              </Button>
+            </Link>
             <Button
               variant="ghost"
               className="w-full justify-start text-muted-foreground hover:text-foreground"
@@ -49,17 +65,19 @@ export function Sidebar() {
                 Soon
               </Badge>
             </Button>
-            <Button
-              variant="ghost"
-              className="w-full justify-start text-muted-foreground hover:text-foreground"
-              disabled
-            >
-              <Database className="w-4 h-4 mr-3" />
-              Data Sources
-              <Badge variant="secondary" className="ml-auto text-xs">
-                Soon
-              </Badge>
-            </Button>
+            <Link href="/dashboard/sources">
+              <Button
+                variant="ghost"
+                className={`w-full justify-start ${
+                  isActive('/dashboard/sources')
+                    ? 'text-foreground bg-sidebar-accent'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                <Database className="w-4 h-4 mr-3" />
+                Data Sources
+              </Button>
+            </Link>
           </div>
         </div>
 

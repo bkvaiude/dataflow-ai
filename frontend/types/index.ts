@@ -16,11 +16,16 @@ export interface ChatMessage {
 }
 
 export interface ChatAction {
-  type: 'oauth' | 'link' | 'button';
+  type: 'oauth' | 'link' | 'button' | 'confirm_reprocess';
   provider?: string;
   url?: string;
   label: string;
   onClick?: () => void;
+  confirmationData?: {
+    connectorId: string;
+    customerId: string;
+    userId: string;
+  };
 }
 
 // Connector types
@@ -81,4 +86,119 @@ export interface ConnectorStatusResponse {
   available: boolean;
   accountName?: string;
   lastSync?: string;
+}
+
+// ============================================================================
+// CDC Source Management Types
+// ============================================================================
+
+// Credential types
+export interface Credential {
+  id: string;
+  name: string;
+  sourceType: 'postgresql' | 'mysql';
+  host: string;
+  database: string;
+  port: number;
+  isValid: boolean;
+  lastValidatedAt?: string;
+  createdAt: string;
+}
+
+export interface CredentialFormData {
+  name: string;
+  sourceType: 'postgresql' | 'mysql';
+  host: string;
+  port: number;
+  database: string;
+  username: string;
+  password: string;
+  testConnection: boolean;
+}
+
+// Schema types
+export interface DiscoveredTable {
+  tableName: string;
+  schemaName: string;
+  columns: ColumnInfo[];
+  primaryKeys: string[];
+  foreignKeys: ForeignKey[];
+  rowCountEstimate?: number;
+  tableSizeBytes?: number;
+  hasPrimaryKey: boolean;
+  cdcEligible: boolean;
+  cdcIssues: string[];
+}
+
+export interface ColumnInfo {
+  name: string;
+  type: string;
+  nullable: boolean;
+  default?: string;
+  isPk: boolean;
+}
+
+export interface ForeignKey {
+  columns: string[];
+  refTable: string;
+  refColumns: string[];
+}
+
+export interface SchemaDiscoveryResult {
+  credentialId: string;
+  discoveredAt: string;
+  schemas: {
+    schemaName: string;
+    tables: DiscoveredTable[];
+  }[];
+  relationshipGraph: {
+    nodes: string[];
+    edges: { from: string; to: string; type: string }[];
+  };
+  summary: {
+    totalTables: number;
+    cdcEligibleTables: number;
+    tablesWithoutPk: number;
+  };
+}
+
+// CDC Readiness types
+export interface CDCReadinessResult {
+  credentialId: string;
+  checkedAt: string;
+  overallReady: boolean;
+  server: {
+    version: string;
+    provider: string;
+    providerDetected: boolean;
+  };
+  checks: Record<string, CDCCheck>;
+  tableReadiness: TableReadiness[];
+  recommendedActions: RecommendedAction[];
+}
+
+export interface CDCCheck {
+  status: 'pass' | 'warning' | 'fail';
+  currentValue?: string | number;
+  requiredValue?: string;
+  used?: number;
+  available?: number;
+  message: string;
+  fixInstructions?: string;
+  fix?: string;
+}
+
+export interface TableReadiness {
+  table: string;
+  ready: boolean;
+  hasPrimaryKey: boolean;
+  hasReplicaIdentity: boolean;
+  replicaIdentity?: string;
+  fix?: string;
+}
+
+export interface RecommendedAction {
+  priority: 'high' | 'medium' | 'low';
+  action: string;
+  providerSpecific: boolean;
 }

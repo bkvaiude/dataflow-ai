@@ -77,13 +77,48 @@ async def connect(sid, environ):
 @sio.event
 async def chat_message(sid, data):
     """Handle incoming chat message"""
+    import json
+
     user_message = data.get('message', '')
     user_id = data.get('user_id', 'anonymous')
+
+    # Check for reprocess confirmation
+    reprocess_confirmation = data.get('_reprocess_confirmation')
 
     print(f"Message from {user_id}: {user_message}")
 
     try:
-        # Process with Gemini agent
+        # Handle reprocess confirmation specially
+        if reprocess_confirmation:
+            if reprocess_confirmation.get('confirmed'):
+                # User confirmed - call create_kafka_pipeline with force_reprocess=True
+                from app.tools.agent_tools import create_kafka_pipeline, set_user_context
+                set_user_context(user_id)
+
+                result = create_kafka_pipeline.invoke({
+                    "connector_id": reprocess_confirmation.get('connectorId', 'google_ads'),
+                    "customer_id": reprocess_confirmation.get('customerId', ''),
+                    "force_reprocess": True
+                })
+
+                # Parse result and send response
+                result_data = json.loads(result)
+                await sio.emit('chat_response', {
+                    'message': f"Reprocessing confirmed! {result_data.get('message', 'Pipeline updated.')}",
+                    'actions': []
+                }, room=sid)
+            else:
+                # User skipped reprocessing
+                await sio.emit('chat_response', {
+                    'message': "No problem! I'll use the existing processed data. You can generate a dashboard with the current data using the generate_dashboard command.",
+                    'actions': [{
+                        "type": "button",
+                        "label": "Generate Dashboard"
+                    }]
+                }, room=sid)
+            return
+
+        # Normal message processing with Gemini agent
         gemini: GeminiService = app.state.gemini
         response = await gemini.process_message(user_message, user_id)
 

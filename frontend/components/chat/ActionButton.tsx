@@ -3,10 +3,11 @@
 import { useState, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import type { ChatAction } from '@/types';
-import { ExternalLink, Link2, Zap, Loader2 } from 'lucide-react';
+import { ExternalLink, Link2, Zap, Loader2, AlertTriangle, RefreshCw, X } from 'lucide-react';
 import { initiateOAuth } from '@/lib/api';
 import { useAuthStore } from '@/stores/authStore';
 import { useChatStore } from '@/stores/chatStore';
+import { getSocket } from '@/lib/socket';
 
 interface ActionButtonProps {
   action: ChatAction;
@@ -85,6 +86,30 @@ export function ActionButton({ action, onClick }: ActionButtonProps) {
     }
   };
 
+  const handleConfirmReprocess = (confirmed: boolean) => {
+    if (!action.confirmationData || !user?.id) return;
+
+    setIsLoading(true);
+
+    const socket = getSocket();
+    if (socket) {
+      const message = confirmed
+        ? `Yes, reprocess my ${action.confirmationData.connectorId} data`
+        : 'No, skip reprocessing and use existing data';
+
+      socket.emit('chat_message', {
+        message,
+        user_id: user.id,
+        _reprocess_confirmation: {
+          confirmed,
+          ...action.confirmationData,
+        },
+      });
+    }
+
+    setIsLoading(false);
+  };
+
   const handleClick = () => {
     if (action.type === 'oauth') {
       handleOAuthClick();
@@ -103,6 +128,8 @@ export function ActionButton({ action, onClick }: ActionButtonProps) {
         return <Zap className="w-4 h-4" />;
       case 'link':
         return <ExternalLink className="w-4 h-4" />;
+      case 'confirm_reprocess':
+        return <AlertTriangle className="w-4 h-4" />;
       default:
         return <Link2 className="w-4 h-4" />;
     }
@@ -118,6 +145,35 @@ export function ActionButton({ action, onClick }: ActionButtonProps) {
         return 'bg-secondary hover:bg-secondary/80 text-secondary-foreground';
     }
   };
+
+  // Render two buttons for confirm_reprocess action type
+  if (action.type === 'confirm_reprocess') {
+    return (
+      <div className="flex gap-2 flex-wrap">
+        <Button
+          onClick={() => handleConfirmReprocess(true)}
+          disabled={isLoading}
+          className="bg-amber-500 hover:bg-amber-600 text-white font-medium transition-all duration-300 hover:scale-105"
+        >
+          {isLoading ? (
+            <Loader2 className="w-4 h-4 animate-spin" />
+          ) : (
+            <RefreshCw className="w-4 h-4" />
+          )}
+          <span className="ml-2">Yes, Reprocess</span>
+        </Button>
+        <Button
+          onClick={() => handleConfirmReprocess(false)}
+          disabled={isLoading}
+          variant="outline"
+          className="font-medium transition-all duration-300 hover:scale-105"
+        >
+          <X className="w-4 h-4" />
+          <span className="ml-2">Skip</span>
+        </Button>
+      </div>
+    );
+  }
 
   return (
     <Button
