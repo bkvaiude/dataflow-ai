@@ -27,9 +27,108 @@ services:
       - ./backend/.env
     volumes:
       - ./backend:/app
+    depends_on:
+      - clickhouse
     networks:
       - dataflow-network
       - common-local
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:23.8
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_DB: dataflow
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    networks:
+      - dataflow-network
+
+  # Kafka Connect with Debezium for CDC + Confluent Avro Converter
+  kafka-connect:
+    build:
+      context: ./kafka-connect
+      dockerfile: Dockerfile
+    hostname: kafka-connect
+    ports:
+      - "8083:8083"
+    environment:
+      # Core Kafka Connect settings
+      BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS}
+      GROUP_ID: dataflow-connect
+      # Internal topic configuration with Confluent Cloud requirements
+      CONFIG_STORAGE_TOPIC: _dataflow-connect-configs
+      OFFSET_STORAGE_TOPIC: _dataflow-connect-offsets
+      STATUS_STORAGE_TOPIC: _dataflow-connect-status
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: "3"
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: "3"
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: "3"
+      # Kafka producer/consumer security for Confluent Cloud
+      CONNECT_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS}
+      CONNECT_SECURITY_PROTOCOL: SASL_SSL
+      CONNECT_SASL_MECHANISM: PLAIN
+      CONNECT_SASL_JAAS_CONFIG: org.apache.kafka.common.security.plain.PlainLoginModule required username="${KAFKA_API_KEY}" password="${KAFKA_API_SECRET}";
+      CONNECT_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: https
+      # Consumer settings for Confluent Cloud
+      CONNECT_CONSUMER_SECURITY_PROTOCOL: SASL_SSL
+      CONNECT_CONSUMER_SASL_MECHANISM: PLAIN
+      CONNECT_CONSUMER_SASL_JAAS_CONFIG: org.apache.kafka.common.security.plain.PlainLoginModule required username="${KAFKA_API_KEY}" password="${KAFKA_API_SECRET}";
+      CONNECT_CONSUMER_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: https
+      # Producer settings for Confluent Cloud
+      CONNECT_PRODUCER_SECURITY_PROTOCOL: SASL_SSL
+      CONNECT_PRODUCER_SASL_MECHANISM: PLAIN
+      CONNECT_PRODUCER_SASL_JAAS_CONFIG: org.apache.kafka.common.security.plain.PlainLoginModule required username="${KAFKA_API_KEY}" password="${KAFKA_API_SECRET}";
+      CONNECT_PRODUCER_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM: https
+      # Schema Registry with auth
+      CONNECT_KEY_CONVERTER: io.confluent.connect.avro.AvroConverter
+      CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: ${SCHEMA_REGISTRY_URL}
+      CONNECT_KEY_CONVERTER_BASIC_AUTH_CREDENTIALS_SOURCE: USER_INFO
+      CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_BASIC_AUTH_USER_INFO: ${SCHEMA_REGISTRY_API_KEY}:${SCHEMA_REGISTRY_API_SECRET}
+      CONNECT_VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: ${SCHEMA_REGISTRY_URL}
+      CONNECT_VALUE_CONVERTER_BASIC_AUTH_CREDENTIALS_SOURCE: USER_INFO
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_BASIC_AUTH_USER_INFO: ${SCHEMA_REGISTRY_API_KEY}:${SCHEMA_REGISTRY_API_SECRET}
+      # REST API settings
+      CONNECT_REST_ADVERTISED_HOST_NAME: kafka-connect
+      CONNECT_REST_PORT: 8083
+      CONNECT_PLUGIN_PATH: /kafka/connect
+    networks:
+      - dataflow-network
+      - common-local
+    depends_on:
+      - backend
+
+  ksqldb-server:
+    image: confluentinc/ksqldb-server:0.29.0
+    hostname: ksqldb-server
+    ports:
+      - "8088:8088"
+    environment:
+      KSQL_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS}
+      KSQL_LISTENERS: http://0.0.0.0:8088
+      KSQL_KSQL_SCHEMA_REGISTRY_URL: ${SCHEMA_REGISTRY_URL}
+      KSQL_KSQL_LOGGING_PROCESSING_STREAM_AUTO_CREATE: "true"
+      KSQL_KSQL_LOGGING_PROCESSING_TOPIC_AUTO_CREATE: "true"
+      # Confluent Cloud SASL auth
+      KSQL_SECURITY_PROTOCOL: SASL_SSL
+      KSQL_SASL_MECHANISM: PLAIN
+      KSQL_SASL_JAAS_CONFIG: >
+        org.apache.kafka.common.security.plain.PlainLoginModule required
+        username="${KAFKA_API_KEY}"
+        password="${KAFKA_API_SECRET}";
+    networks:
+      - dataflow-network
+    depends_on:
+      - kafka-connect
+
+  # Note: Mailhog is running in common-local network (zidans-ai-backend-mailhog-1)
+  # SMTP: mailhog:1025 | Web UI: http://localhost:8025
+
+volumes:
+  clickhouse-data:
 
 networks:
   dataflow-network:

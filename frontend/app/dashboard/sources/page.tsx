@@ -6,6 +6,10 @@ import { CredentialForm } from '@/components/credentials/CredentialForm';
 import { CredentialList } from '@/components/credentials/CredentialList';
 import { SchemaViewer } from '@/components/schema/SchemaViewer';
 import { CDCReadinessCard } from '@/components/schema/CDCReadinessCard';
+import { DataPreviewTable } from '@/components/preview/DataPreviewTable';
+import { AnomalyWarnings } from '@/components/preview/AnomalyWarnings';
+import { TemplateBuilder } from '@/components/templates/TemplateBuilder';
+import { TemplateList } from '@/components/templates/TemplateList';
 import type {
   Credential,
   CredentialFormData,
@@ -13,6 +17,13 @@ import type {
   CDCReadinessResult,
   DiscoveredTable,
 } from '@/types';
+import type {
+  SampleDataResult,
+  AnalysisResult,
+  PipelineTemplate,
+  Transform,
+  AnomalyThresholdConfig,
+} from '@/types/preview';
 import {
   Database,
   Plus,
@@ -21,6 +32,9 @@ import {
   CheckCircle2,
   ArrowRight,
   Loader2,
+  X,
+  FileText,
+  Sparkles,
 } from 'lucide-react';
 import { useAuthStore } from '@/stores/authStore';
 
@@ -44,12 +58,26 @@ export default function SourcesPage() {
   const [isDiscoveringSchema, setIsDiscoveringSchema] = useState(false);
   const [isCheckingReadiness, setIsCheckingReadiness] = useState(false);
 
+  // Preview state
+  const [previewingTable, setPreviewingTable] = useState<string | null>(null);
+  const [sampleData, setSampleData] = useState<SampleDataResult | null>(null);
+  const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
+  const [isLoadingPreview, setIsLoadingPreview] = useState(false);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+
+  // Template state
+  const [templates, setTemplates] = useState<PipelineTemplate[]>([]);
+  const [isLoadingTemplates, setIsLoadingTemplates] = useState(false);
+  const [showTemplateBuilder, setShowTemplateBuilder] = useState(false);
+  const [editingTemplate, setEditingTemplate] = useState<PipelineTemplate | null>(null);
+
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
   // Fetch credentials on mount
   useEffect(() => {
     if (user && session) {
       fetchCredentials();
+      fetchTemplates();
     }
   }, [user, session]);
 
@@ -78,6 +106,34 @@ export default function SourcesPage() {
       console.error('Failed to fetch credentials:', error);
     } finally {
       setIsLoadingCredentials(false);
+    }
+  };
+
+  const fetchTemplates = async () => {
+    if (!session) return;
+    setIsLoadingTemplates(true);
+    try {
+      const response = await fetch(`${API_URL}/api/templates/?session=${session}`);
+      if (response.ok) {
+        const data = await response.json();
+        // Transform snake_case to camelCase (API returns array directly)
+        const templateData = Array.isArray(data) ? data : (data.templates || []);
+        const transformed = templateData.map((t: Record<string, unknown>) => ({
+          id: t.id,
+          name: t.name,
+          description: t.description,
+          transforms: t.transforms || [],
+          anomalyConfig: t.anomaly_config || {},
+          isDefault: t.is_default || false,
+          createdAt: t.created_at,
+          updatedAt: t.updated_at,
+        }));
+        setTemplates(transformed);
+      }
+    } catch (error) {
+      console.error('Failed to fetch templates:', error);
+    } finally {
+      setIsLoadingTemplates(false);
     }
   };
 
@@ -128,6 +184,8 @@ export default function SourcesPage() {
           setSelectedCredential(null);
           setSchema(null);
           setCdcReadiness(null);
+          setSampleData(null);
+          setPreviewingTable(null);
         }
       }
     } catch (error) {
@@ -281,10 +339,247 @@ export default function SourcesPage() {
     }
   }, [selectedCredential, session, API_URL]);
 
+  const handlePreviewTable = useCallback(async (table: DiscoveredTable) => {
+    if (!selectedCredential || !session) return;
+
+    const tableKey = `${table.schemaName}.${table.tableName}`;
+
+    // Toggle off if clicking same table
+    if (previewingTable === tableKey) {
+      setPreviewingTable(null);
+      setSampleData(null);
+      setAnalysisResult(null);
+      return;
+    }
+
+    setPreviewingTable(tableKey);
+    setIsLoadingPreview(true);
+    setSampleData(null);
+    setAnalysisResult(null);
+
+    try {
+      const response = await fetch(`${API_URL}/api/preview/sample?session=${session}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          credential_id: selectedCredential.id,
+          table_name: table.tableName,
+          schema_name: table.schemaName,
+          limit: 100,
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        // Transform to camelCase
+        const result: SampleDataResult = {
+          tableName: data.table_name,
+          schemaName: data.schema_name,
+          columns: (data.columns || []).map((c: { name: string; type: string; nullable: boolean }) => ({
+            name: c.name,
+            type: c.type,
+            nullable: c.nullable,
+          })),
+          rows: data.rows || [],
+          rowCount: data.row_count,
+          totalRowsEstimate: data.total_rows_estimate,
+          fetchedAt: data.fetched_at,
+        };
+        setSampleData(result);
+      } else {
+        console.error('Failed to fetch sample data');
+      }
+    } catch (error) {
+      console.error('Failed to fetch sample data:', error);
+    } finally {
+      setIsLoadingPreview(false);
+    }
+  }, [selectedCredential, session, API_URL, previewingTable]);
+
+  const handleAnalyzeData = useCallback(async (thresholds?: AnomalyThresholdConfig) => {
+    if (!sampleData || !session) return;
+
+    setIsAnalyzing(true);
+    try {
+      const response = await fetch(`${API_URL}/api/preview/analyze-sample?session=${session}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          data: {
+            columns: sampleData.columns,
+            rows: sampleData.rows,
+            row_count: sampleData.rowCount,
+          },
+          thresholds: thresholds ? {
+            null_ratio: thresholds.nullRatio,
+            type_coercion: thresholds.typeCoercion,
+            cardinality: thresholds.cardinality,
+            missing_required: thresholds.missingRequired,
+          } : undefined,
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        const result: AnalysisResult = {
+          anomalies: (data.anomalies || []).map((a: Record<string, unknown>) => ({
+            type: a.type,
+            severity: a.severity,
+            column: a.column,
+            message: a.message,
+            details: a.details || {},
+          })),
+          summary: data.summary || {
+            totalAnomalies: 0,
+            errors: 0,
+            warnings: 0,
+            info: 0,
+          },
+          canProceed: data.can_proceed ?? true,
+        };
+        setAnalysisResult(result);
+      }
+    } catch (error) {
+      console.error('Failed to analyze data:', error);
+    } finally {
+      setIsAnalyzing(false);
+    }
+  }, [sampleData, session, API_URL]);
+
+  const handleClosePreview = () => {
+    setPreviewingTable(null);
+    setSampleData(null);
+    setAnalysisResult(null);
+  };
+
+  // Template handlers
+  const handleSaveTemplate = async (
+    name: string,
+    description: string,
+    transforms: Transform[],
+    anomalyConfig: AnomalyThresholdConfig
+  ): Promise<void> => {
+    if (!session) return;
+
+    try {
+      const url = editingTemplate
+        ? `${API_URL}/api/templates/${editingTemplate.id}?session=${session}`
+        : `${API_URL}/api/templates/?session=${session}`;
+
+      const method = editingTemplate ? 'PUT' : 'POST';
+
+      const response = await fetch(url, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          name,
+          description,
+          transforms,
+          anomaly_config: {
+            null_ratio: anomalyConfig.nullRatio,
+            type_coercion: anomalyConfig.typeCoercion,
+            cardinality: anomalyConfig.cardinality,
+            missing_required: anomalyConfig.missingRequired,
+          },
+        }),
+      });
+
+      if (response.ok) {
+        await fetchTemplates();
+        setShowTemplateBuilder(false);
+        setEditingTemplate(null);
+      }
+    } catch (error) {
+      console.error('Failed to save template:', error);
+    }
+  };
+
+  const handleApplyTemplate = async (templateId: string): Promise<void> => {
+    if (!selectedCredential || !session) return;
+
+    try {
+      const response = await fetch(`${API_URL}/api/templates/${templateId}/apply?session=${session}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          credential_id: selectedCredential.id,
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        // Update the analysis result with template results
+        if (data.analysis) {
+          setAnalysisResult({
+            anomalies: data.analysis.anomalies || [],
+            summary: data.analysis.summary || { totalAnomalies: 0, errors: 0, warnings: 0, info: 0 },
+            canProceed: data.analysis.can_proceed ?? true,
+          });
+        }
+      }
+    } catch (error) {
+      console.error('Failed to apply template:', error);
+    }
+  };
+
+  const handleEditTemplate = (template: PipelineTemplate) => {
+    setEditingTemplate(template);
+    setShowTemplateBuilder(true);
+  };
+
+  const handleDeleteTemplate = async (templateId: string): Promise<void> => {
+    if (!session) return;
+
+    try {
+      const response = await fetch(`${API_URL}/api/templates/${templateId}?session=${session}`, {
+        method: 'DELETE',
+      });
+
+      if (response.ok) {
+        await fetchTemplates();
+      }
+    } catch (error) {
+      console.error('Failed to delete template:', error);
+    }
+  };
+
+  const handleSetDefaultTemplate = async (templateId: string): Promise<void> => {
+    if (!session) return;
+
+    try {
+      const response = await fetch(`${API_URL}/api/templates/${templateId}?session=${session}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          is_default: true,
+        }),
+      });
+
+      if (response.ok) {
+        await fetchTemplates();
+      }
+    } catch (error) {
+      console.error('Failed to set default template:', error);
+    }
+  };
+
   const handleSelectCredential = (credential: Credential) => {
     setSelectedCredential(credential);
     setSchema(null);
     setCdcReadiness(null);
+    setSampleData(null);
+    setPreviewingTable(null);
+    setAnalysisResult(null);
   };
 
   return (
@@ -306,13 +601,26 @@ export default function SourcesPage() {
             </div>
           </div>
 
-          <Button
-            onClick={() => setIsFormOpen(true)}
-            className="bg-primary hover:bg-primary/90 text-primary-foreground gap-2"
-          >
-            <Plus className="w-4 h-4" />
-            Add Database
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              onClick={() => {
+                setEditingTemplate(null);
+                setShowTemplateBuilder(true);
+              }}
+              className="gap-2"
+            >
+              <FileText className="w-4 h-4" />
+              Templates
+            </Button>
+            <Button
+              onClick={() => setIsFormOpen(true)}
+              className="bg-primary hover:bg-primary/90 text-primary-foreground gap-2"
+            >
+              <Plus className="w-4 h-4" />
+              Add Database
+            </Button>
+          </div>
         </div>
       </header>
 
@@ -397,67 +705,168 @@ export default function SourcesPage() {
                 </div>
               </div>
 
-              {/* Content Area */}
-              <div className="flex-1 overflow-y-auto p-6 space-y-6">
-                {/* Quick Actions */}
-                {!schema && !cdcReadiness && (
-                  <div className="grid grid-cols-2 gap-4">
-                    <button
-                      onClick={handleDiscoverSchema}
-                      disabled={isDiscoveringSchema || !selectedCredential.isValid}
-                      className="group p-6 rounded-2xl border border-white/10 bg-white/5 hover:bg-white/[0.07] hover:border-primary/30 transition-all text-left"
-                    >
-                      <div className="w-12 h-12 rounded-xl bg-blue-500/10 border border-blue-500/20 flex items-center justify-center mb-4 group-hover:scale-105 transition-transform">
-                        <Layers className="w-6 h-6 text-blue-400" />
-                      </div>
-                      <h3 className="text-lg font-display font-semibold text-foreground mb-1">
-                        Discover Schema
-                      </h3>
-                      <p className="text-sm text-muted-foreground">
-                        Explore tables, columns, and relationships in your database.
-                      </p>
-                      <div className="mt-4 flex items-center gap-2 text-sm text-primary opacity-0 group-hover:opacity-100 transition-opacity">
-                        Start Discovery <ArrowRight className="w-4 h-4" />
-                      </div>
-                    </button>
+              {/* Content Area with Preview Split */}
+              <div className="flex-1 flex overflow-hidden">
+                {/* Schema/CDC Content */}
+                <div className={`flex-1 overflow-y-auto p-6 space-y-6 transition-all ${
+                  previewingTable ? 'max-w-[50%]' : ''
+                }`}>
+                  {/* Quick Actions */}
+                  {!schema && !cdcReadiness && (
+                    <div className="grid grid-cols-2 gap-4">
+                      <button
+                        onClick={handleDiscoverSchema}
+                        disabled={isDiscoveringSchema || !selectedCredential.isValid}
+                        className="group p-6 rounded-2xl border border-white/10 bg-white/5 hover:bg-white/[0.07] hover:border-primary/30 transition-all text-left"
+                      >
+                        <div className="w-12 h-12 rounded-xl bg-blue-500/10 border border-blue-500/20 flex items-center justify-center mb-4 group-hover:scale-105 transition-transform">
+                          <Layers className="w-6 h-6 text-blue-400" />
+                        </div>
+                        <h3 className="text-lg font-display font-semibold text-foreground mb-1">
+                          Discover Schema
+                        </h3>
+                        <p className="text-sm text-muted-foreground">
+                          Explore tables, columns, and relationships in your database.
+                        </p>
+                        <div className="mt-4 flex items-center gap-2 text-sm text-primary opacity-0 group-hover:opacity-100 transition-opacity">
+                          Start Discovery <ArrowRight className="w-4 h-4" />
+                        </div>
+                      </button>
 
-                    <button
-                      onClick={handleCheckReadiness}
-                      disabled={isCheckingReadiness || !selectedCredential.isValid}
-                      className="group p-6 rounded-2xl border border-white/10 bg-white/5 hover:bg-white/[0.07] hover:border-primary/30 transition-all text-left"
-                    >
-                      <div className="w-12 h-12 rounded-xl bg-green-500/10 border border-green-500/20 flex items-center justify-center mb-4 group-hover:scale-105 transition-transform">
-                        <Zap className="w-6 h-6 text-green-400" />
+                      <button
+                        onClick={handleCheckReadiness}
+                        disabled={isCheckingReadiness || !selectedCredential.isValid}
+                        className="group p-6 rounded-2xl border border-white/10 bg-white/5 hover:bg-white/[0.07] hover:border-primary/30 transition-all text-left"
+                      >
+                        <div className="w-12 h-12 rounded-xl bg-green-500/10 border border-green-500/20 flex items-center justify-center mb-4 group-hover:scale-105 transition-transform">
+                          <Zap className="w-6 h-6 text-green-400" />
+                        </div>
+                        <h3 className="text-lg font-display font-semibold text-foreground mb-1">
+                          Check CDC Readiness
+                        </h3>
+                        <p className="text-sm text-muted-foreground">
+                          Verify your database is configured for Change Data Capture.
+                        </p>
+                        <div className="mt-4 flex items-center gap-2 text-sm text-primary opacity-0 group-hover:opacity-100 transition-opacity">
+                          Run Check <ArrowRight className="w-4 h-4" />
+                        </div>
+                      </button>
+                    </div>
+                  )}
+
+                  {/* CDC Readiness Card */}
+                  {(cdcReadiness || isCheckingReadiness) && (
+                    <CDCReadinessCard
+                      readiness={cdcReadiness}
+                      isLoading={isCheckingReadiness}
+                      onRefresh={handleCheckReadiness}
+                    />
+                  )}
+
+                  {/* Schema Viewer */}
+                  {(schema || isDiscoveringSchema) && (
+                    <SchemaViewer
+                      schema={schema}
+                      isLoading={isDiscoveringSchema}
+                      onRefresh={handleDiscoverSchema}
+                      onPreviewTable={handlePreviewTable}
+                      previewingTable={previewingTable}
+                    />
+                  )}
+                </div>
+
+                {/* Preview Panel */}
+                {previewingTable && (
+                  <div className="w-1/2 border-l border-white/5 flex flex-col overflow-hidden bg-white/[0.01] animate-fade-in">
+                    {/* Preview Header */}
+                    <div className="shrink-0 px-4 py-3 border-b border-white/5 bg-white/[0.02] flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Sparkles className="w-4 h-4 text-primary" />
+                        <h3 className="text-sm font-medium text-foreground">
+                          Data Preview
+                        </h3>
+                        <span className="text-xs text-muted-foreground font-mono">
+                          {previewingTable}
+                        </span>
                       </div>
-                      <h3 className="text-lg font-display font-semibold text-foreground mb-1">
-                        Check CDC Readiness
-                      </h3>
-                      <p className="text-sm text-muted-foreground">
-                        Verify your database is configured for Change Data Capture.
-                      </p>
-                      <div className="mt-4 flex items-center gap-2 text-sm text-primary opacity-0 group-hover:opacity-100 transition-opacity">
-                        Run Check <ArrowRight className="w-4 h-4" />
-                      </div>
-                    </button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={handleClosePreview}
+                        className="h-7 w-7 p-0"
+                      >
+                        <X className="w-4 h-4" />
+                      </Button>
+                    </div>
+
+                    {/* Preview Content */}
+                    <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                      {/* Sample Data Table */}
+                      <DataPreviewTable
+                        data={sampleData}
+                        isLoading={isLoadingPreview}
+                      />
+
+                      {/* Analyze Button */}
+                      {sampleData && !analysisResult && (
+                        <Button
+                          onClick={() => handleAnalyzeData()}
+                          disabled={isAnalyzing}
+                          className="w-full bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/20 gap-2"
+                        >
+                          {isAnalyzing ? (
+                            <>
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                              Analyzing...
+                            </>
+                          ) : (
+                            <>
+                              <Sparkles className="w-4 h-4" />
+                              Analyze Data Quality
+                            </>
+                          )}
+                        </Button>
+                      )}
+
+                      {/* Anomaly Warnings */}
+                      <AnomalyWarnings
+                        analysis={analysisResult}
+                        isLoading={isAnalyzing}
+                      />
+
+                      {/* Template Actions */}
+                      {sampleData && (
+                        <div className="p-4 rounded-xl border border-white/10 bg-white/[0.02]">
+                          <div className="flex items-center justify-between mb-3">
+                            <h4 className="text-sm font-medium text-foreground">Pipeline Templates</h4>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => {
+                                setEditingTemplate(null);
+                                setShowTemplateBuilder(true);
+                              }}
+                              className="text-xs gap-1"
+                            >
+                              <Plus className="w-3 h-3" /> New Template
+                            </Button>
+                          </div>
+                          <TemplateList
+                            templates={templates}
+                            isLoading={isLoadingTemplates}
+                            onApply={handleApplyTemplate}
+                            onEdit={handleEditTemplate}
+                            onDelete={handleDeleteTemplate}
+                            onSetDefault={handleSetDefaultTemplate}
+                            onCreateNew={() => {
+                              setEditingTemplate(null);
+                              setShowTemplateBuilder(true);
+                            }}
+                          />
+                        </div>
+                      )}
+                    </div>
                   </div>
-                )}
-
-                {/* CDC Readiness Card */}
-                {(cdcReadiness || isCheckingReadiness) && (
-                  <CDCReadinessCard
-                    readiness={cdcReadiness}
-                    isLoading={isCheckingReadiness}
-                    onRefresh={handleCheckReadiness}
-                  />
-                )}
-
-                {/* Schema Viewer */}
-                {(schema || isDiscoveringSchema) && (
-                  <SchemaViewer
-                    schema={schema}
-                    isLoading={isDiscoveringSchema}
-                    onRefresh={handleDiscoverSchema}
-                  />
                 )}
               </div>
             </>
@@ -501,6 +910,31 @@ export default function SourcesPage() {
         isOpen={isFormOpen}
         onClose={() => setIsFormOpen(false)}
         onSubmit={handleCreateCredential}
+      />
+
+      {/* Template Builder Modal */}
+      <TemplateBuilder
+        isOpen={showTemplateBuilder}
+        onClose={() => {
+          setShowTemplateBuilder(false);
+          setEditingTemplate(null);
+        }}
+        onSave={async (templateData) => {
+          await handleSaveTemplate(
+            templateData.name,
+            templateData.description || '',
+            templateData.transforms,
+            templateData.anomalyConfig
+          );
+        }}
+        tables={schema?.schemas.flatMap(s => s.tables) || []}
+        initialData={editingTemplate ? {
+          name: editingTemplate.name,
+          description: editingTemplate.description,
+          transforms: editingTemplate.transforms,
+          anomalyConfig: editingTemplate.anomalyConfig,
+        } : undefined}
+        isEditing={!!editingTemplate}
       />
     </div>
   );

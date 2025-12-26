@@ -230,6 +230,44 @@ class CredentialService:
         finally:
             session.close()
 
+    def find_existing_credential(
+        self,
+        user_id: str,
+        host: str,
+        database: str,
+        port: int = 5432
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Find existing credential by host, database, and port.
+        Used to detect duplicates before creating new credentials.
+
+        Args:
+            user_id: User ID
+            host: Database hostname
+            database: Database name
+            port: Database port (default 5432)
+
+        Returns:
+            Credential dict if found, None otherwise
+        """
+        from app.db.models import Credential
+
+        session = self._get_session()
+        try:
+            credential = session.query(Credential).filter(
+                Credential.user_id == user_id,
+                Credential.host == host,
+                Credential.database == database,
+                Credential.port == port
+            ).first()
+
+            if credential:
+                return credential.to_dict()
+            return None
+
+        finally:
+            session.close()
+
     def delete_credentials(self, user_id: str, credential_id: str) -> bool:
         """
         Delete credentials

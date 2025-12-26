@@ -39,6 +39,31 @@ class Settings(BaseSettings):
     # Credential Encryption
     credential_encryption_key: str = ""
 
+    # Confluent Cloud API (for managed connectors)
+    confluent_cloud_api_key: str = ""
+    confluent_cloud_api_secret: str = ""
+    confluent_environment_id: str = ""
+    confluent_cluster_id: str = ""
+
+    # Local Kafka Connect (for local PostgreSQL CDC)
+    kafka_connect_url: str = ""
+
+    # ClickHouse
+    clickhouse_host: str = "localhost"
+    clickhouse_port: int = 8123
+    clickhouse_user: str = "default"
+    clickhouse_password: str = ""
+    clickhouse_database: str = "dataflow"
+
+    # ksqlDB
+    ksqldb_url: str = "http://localhost:8088"
+
+    # SMTP (Mailhog for development)
+    smtp_host: str = "mailhog"
+    smtp_port: int = 1025
+    smtp_use_tls: bool = False
+    alert_from_email: str = "alerts@dataflow-ai.local"
+
     @property
     def is_development(self) -> bool:
         return self.environment == "development"
@@ -55,6 +80,19 @@ class Settings(BaseSettings):
     @property
     def has_schema_registry_credentials(self) -> bool:
         return bool(self.schema_registry_url and self.schema_registry_api_key)
+
+    @property
+    def has_kafka_connect_url(self) -> bool:
+        return bool(self.kafka_connect_url and self.kafka_connect_url.strip())
+
+    @property
+    def has_confluent_cloud_api(self) -> bool:
+        return bool(
+            self.confluent_cloud_api_key and
+            self.confluent_cloud_api_secret and
+            self.confluent_environment_id and
+            self.confluent_cluster_id
+        )
 
     @property
     def has_google_ads_developer_token(self) -> bool:

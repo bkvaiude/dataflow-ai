@@ -7,6 +7,7 @@ from app.config import settings
 from app.api.routes import router
 from app.services.gemini_service import GeminiService
 from app.services.metrics_processor import metrics_processor
+from app.services.monitoring_service import monitoring_service
 
 # Socket.IO server
 sio = socketio.AsyncServer(
@@ -31,10 +32,15 @@ async def lifespan(app: FastAPI):
         metrics_processor.start()
         print("  - Metrics Processor: STARTED")
 
+    # Start background monitoring service
+    await monitoring_service.start()
+    print("  - Monitoring Service: STARTED")
+
     yield
 
     # Shutdown
     print("Shutting down DataFlow AI API...")
+    await monitoring_service.stop()
     metrics_processor.stop()
 
 

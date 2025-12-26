@@ -13,6 +13,7 @@ import {
   HelpCircle,
   Trash2,
   Plug,
+  GitBranch,
 } from 'lucide-react';
 
 const connectors = [
@@ -76,6 +77,19 @@ export function Sidebar() {
               >
                 <Database className="w-4 h-4 mr-3" />
                 Data Sources
+              </Button>
+            </Link>
+            <Link href="/dashboard/pipelines">
+              <Button
+                variant="ghost"
+                className={`w-full justify-start ${
+                  isActive('/dashboard/pipelines')
+                    ? 'text-foreground bg-sidebar-accent'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                <GitBranch className="w-4 h-4 mr-3" />
+                Pipelines
               </Button>
             </Link>
           </div>

@@ -202,3 +202,177 @@ export interface RecommendedAction {
   action: string;
   providerSpecific: boolean;
 }
+
+// ============================================================================
+// CDC Pipeline Types
+// ============================================================================
+
+export type PipelineStatus = 'pending' | 'running' | 'paused' | 'failed' | 'stopped';
+
+export interface Pipeline {
+  id: string;
+  name: string;
+  description?: string;
+  sourceCredentialId: string;
+  sourceTables: string[];
+  sourceConnectorName?: string;
+  sinkType: 'clickhouse' | 'kafka' | 's3';
+  sinkConfig: SinkConfig;
+  sinkConnectorName?: string;
+  templateId?: string;
+  status: PipelineStatus;
+  lastHealthCheck?: string;
+  errorMessage?: string;
+  metricsCache?: PipelineMetricsCache;
+  metricsUpdatedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  stoppedAt?: string;
+}
+
+export interface SinkConfig {
+  // ClickHouse sink
+  host?: string;
+  port?: number;
+  database?: string;
+  username?: string;
+  password?: string;
+  // Kafka sink
+  bootstrapServers?: string;
+  topic?: string;
+  // S3 sink
+  bucket?: string;
+  region?: string;
+  prefix?: string;
+}
+
+export interface PipelineMetricsCache {
+  totalEvents?: number;
+  eventsPerSecond?: number;
+  lagMs?: number;
+  lastEventAt?: string;
+}
+
+export interface PipelineEvent {
+  id: string;
+  pipelineId: string;
+  eventType: 'created' | 'started' | 'paused' | 'resumed' | 'stopped' | 'failed' | 'error';
+  message?: string;
+  details?: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface PipelineHealth {
+  pipelineId: string;
+  status: PipelineStatus;
+  sourceConnector: ConnectorStatus;
+  sinkConnector: ConnectorStatus;
+  lastCheck: string;
+  errors: PipelineError[];
+}
+
+export interface ConnectorStatus {
+  name?: string;
+  status: 'running' | 'paused' | 'failed' | 'unknown';
+  taskCount?: number;
+  failedTasks?: number;
+}
+
+export interface PipelineError {
+  timestamp: string;
+  component: string;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+export interface PipelineMetrics {
+  pipelineId: string;
+  lag: {
+    currentMs: number;
+    avgMs: number;
+    maxMs: number;
+  };
+  throughput: {
+    eventsPerSecond: number;
+    bytesPerSecond: number;
+    totalEvents: number;
+  };
+  windowSeconds: number;
+  updatedAt: string;
+}
+
+export interface CreatePipelineRequest {
+  name: string;
+  description?: string;
+  sourceCredentialId: string;
+  sourceTables: string[];
+  sinkType: 'clickhouse' | 'kafka' | 's3';
+  sinkConfig: SinkConfig;
+  templateId?: string;
+}
+
+// ============================================================================
+// Enrichment Types (Stream-Table JOINs)
+// ============================================================================
+
+export type EnrichmentStatus = 'pending' | 'active' | 'failed' | 'stopped';
+
+export interface LookupTable {
+  topic: string;
+  key: string;
+  alias: string;
+  ksqldbTable?: string;
+  schema?: ColumnInfo[];
+}
+
+export interface JoinKey {
+  streamColumn: string;
+  tableColumn: string;
+  tableAlias?: string;
+}
+
+export interface Enrichment {
+  id: string;
+  pipelineId: string;
+  name: string;
+  description?: string;
+  sourceStreamName: string;
+  sourceTopic: string;
+  lookupTables: LookupTable[];
+  joinType: 'LEFT' | 'INNER';
+  joinKeys: JoinKey[];
+  outputColumns: string[];
+  outputStreamName: string;
+  outputTopic: string;
+  ksqldbQueryId?: string;
+  status: EnrichmentStatus;
+  createdAt: string;
+  updatedAt: string;
+  activatedAt?: string;
+}
+
+export interface CreateEnrichmentRequest {
+  pipelineId: string;
+  name: string;
+  description?: string;
+  sourceTopic: string;
+  lookupTables: LookupTable[];
+  joinKeys: JoinKey[];
+  outputColumns: string[];
+  joinType?: 'LEFT' | 'INNER';
+}
+
+export interface EnrichmentPreview {
+  sampleData: Record<string, unknown>[];
+  rowCount: number;
+  nullStats: Record<string, { count: number; percentage: number }>;
+  warnings: string[];
+}
+
+export interface EnrichmentMetrics {
+  messagesProcessed?: number;
+  messagesPerSecond?: number;
+  lagMs?: number;
+  lastProcessedAt?: string;
+}

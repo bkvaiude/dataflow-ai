@@ -23,6 +23,7 @@ import {
   Search,
   Database,
   RefreshCw,
+  Eye,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -31,6 +32,8 @@ interface SchemaViewerProps {
   schema: SchemaDiscoveryResult | null;
   isLoading?: boolean;
   onRefresh?: () => Promise<void>;
+  onPreviewTable?: (table: DiscoveredTable) => void;
+  previewingTable?: string | null;
 }
 
 function getTypeIcon(type: string) {
@@ -105,18 +108,25 @@ interface TableRowProps {
   table: DiscoveredTable;
   isExpanded: boolean;
   onToggle: () => void;
+  onPreview?: (table: DiscoveredTable) => void;
+  isPreviewing?: boolean;
 }
 
-function TableRow({ table, isExpanded, onToggle }: TableRowProps) {
+function TableRow({ table, isExpanded, onToggle, onPreview, isPreviewing }: TableRowProps) {
   const hasForeignKeys = table.foreignKeys && table.foreignKeys.length > 0;
 
   return (
-    <div className="border border-white/10 rounded-xl overflow-hidden bg-white/[0.02] hover:bg-white/[0.04] transition-colors">
+    <div className={`border rounded-xl overflow-hidden transition-colors ${
+      isPreviewing
+        ? 'border-primary/50 bg-primary/5 ring-1 ring-primary/20'
+        : 'border-white/10 bg-white/[0.02] hover:bg-white/[0.04]'
+    }`}>
       {/* Table Header */}
-      <button
-        onClick={onToggle}
-        className="w-full px-4 py-3 flex items-center gap-3 text-left hover:bg-white/[0.02] transition-colors"
-      >
+      <div className="px-4 py-3 flex items-center gap-3">
+        <button
+          onClick={onToggle}
+          className="flex items-center gap-3 flex-1 text-left hover:opacity-80 transition-opacity"
+        >
         <span className="text-muted-foreground transition-transform duration-200">
           {isExpanded ? (
             <ChevronDown className="w-4 h-4" />
@@ -160,21 +170,42 @@ function TableRow({ table, isExpanded, onToggle }: TableRowProps) {
           </div>
         </div>
 
-        {/* CDC Status Badge */}
-        <div className="shrink-0">
-          {table.cdcEligible ? (
-            <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-green-500/10 border border-green-500/20 text-green-400 text-xs font-medium">
-              <CheckCircle2 className="w-3.5 h-3.5" />
-              CDC Ready
-            </span>
-          ) : (
-            <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-red-500/10 border border-red-500/20 text-red-400 text-xs font-medium">
-              <XCircle className="w-3.5 h-3.5" />
-              Not Eligible
-            </span>
-          )}
-        </div>
-      </button>
+          {/* CDC Status Badge */}
+          <div className="shrink-0">
+            {table.cdcEligible ? (
+              <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-green-500/10 border border-green-500/20 text-green-400 text-xs font-medium">
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                CDC Ready
+              </span>
+            ) : (
+              <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-red-500/10 border border-red-500/20 text-red-400 text-xs font-medium">
+                <XCircle className="w-3.5 h-3.5" />
+                Not Eligible
+              </span>
+            )}
+          </div>
+        </button>
+
+        {/* Preview Button */}
+        {onPreview && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={(e) => {
+              e.stopPropagation();
+              onPreview(table);
+            }}
+            className={`shrink-0 gap-1.5 text-xs ${
+              isPreviewing
+                ? 'bg-primary/20 text-primary hover:bg-primary/30'
+                : 'text-muted-foreground hover:text-primary'
+            }`}
+          >
+            <Eye className="w-3.5 h-3.5" />
+            {isPreviewing ? 'Viewing' : 'Preview'}
+          </Button>
+        )}
+      </div>
 
       {/* Expanded Content */}
       {isExpanded && (
@@ -262,7 +293,7 @@ function TableRow({ table, isExpanded, onToggle }: TableRowProps) {
   );
 }
 
-export function SchemaViewer({ schema, isLoading = false, onRefresh }: SchemaViewerProps) {
+export function SchemaViewer({ schema, isLoading = false, onRefresh, onPreviewTable, previewingTable }: SchemaViewerProps) {
   const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set());
   const [searchQuery, setSearchQuery] = useState('');
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -443,6 +474,8 @@ export function SchemaViewer({ schema, isLoading = false, onRefresh }: SchemaVie
                 table={table}
                 isExpanded={expandedTables.has(tableKey)}
                 onToggle={() => toggleTable(tableKey)}
+                onPreview={onPreviewTable}
+                isPreviewing={previewingTable === tableKey}
               />
             );
           })

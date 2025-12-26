@@ -227,3 +227,33 @@ def get_user_tokens(user_id: str) -> Optional[dict]:
         if session_data.get("id") == user_id:
             return session_data.get("tokens")
     return None
+
+
+# DEV ONLY: Test session endpoint for Playwright testing
+@router.post("/dev/test-session")
+async def create_test_session():
+    """
+    DEV ONLY: Create a test session for automated testing.
+    Remove this endpoint in production.
+    """
+    test_user = {
+        "id": "test-user-123",
+        "email": "test@example.com",
+        "name": "Test User",
+        "picture": None,
+    }
+
+    # Create or get existing user in DB
+    from app.services.db_service import db_service
+    try:
+        db_service.get_or_create_user(
+            google_id=test_user["id"],
+            email=test_user["email"],
+            name=test_user["name"],
+            picture=test_user["picture"]
+        )
+    except Exception:
+        pass  # User might already exist
+
+    session_id = create_session(test_user)
+    return {"session": session_id, "user": test_user}
