@@ -3,7 +3,7 @@ import { getIdToken } from './firebase';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
-// Helper to make authenticated requests
+// Helper to make authenticated requests with automatic token refresh
 const fetchWithAuth = async <T>(
   endpoint: string,
   options: RequestInit = {}
@@ -19,6 +19,31 @@ const fetchWithAuth = async <T>(
         ...options.headers,
       },
     });
+
+    // Handle 401 Unauthorized - token might have expired
+    if (response.status === 401) {
+      // Try refreshing token and retry once
+      const refreshed = await import('./firebase').then(m => m.checkAuthStatus());
+      if (refreshed) {
+        const newToken = await getIdToken();
+        const retryResponse = await fetch(`${API_URL}${endpoint}`, {
+          ...options,
+          headers: {
+            'Content-Type': 'application/json',
+            ...(newToken && { Authorization: `Bearer ${newToken}` }),
+            ...options.headers,
+          },
+        });
+
+        const retryData = await retryResponse.json();
+        if (!retryResponse.ok) {
+          return { success: false, error: retryData.detail || 'Request failed' };
+        }
+        return { success: true, data: retryData };
+      }
+
+      return { success: false, error: 'Authentication required' };
+    }
 
     const data = await response.json();
 

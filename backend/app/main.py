@@ -84,17 +84,63 @@ async def connect(sid, environ):
 async def chat_message(sid, data):
     """Handle incoming chat message"""
     import json
+    from app.services.confirmation_handlers import confirmation_handlers
 
     user_message = data.get('message', '')
     user_id = data.get('user_id', 'anonymous')
 
-    # Check for reprocess confirmation
+    # Check for reprocess confirmation (legacy)
     reprocess_confirmation = data.get('_reprocess_confirmation')
+
+    # Check for new confirmation types
+    confirmation = data.get('_confirmation')
 
     print(f"Message from {user_id}: {user_message}")
 
     try:
-        # Handle reprocess confirmation specially
+        # Handle new confirmation types
+        if confirmation:
+            action_type = confirmation.get('action_type')
+            print(f"Processing confirmation: {action_type}")
+
+            if action_type == 'confirm_source_select':
+                response = await confirmation_handlers.handle_source_selection(
+                    confirmation, user_id
+                )
+            elif action_type == 'confirm_credentials':
+                response = await confirmation_handlers.handle_credential_confirmation(
+                    confirmation, user_id
+                )
+            elif action_type == 'confirm_tables':
+                response = await confirmation_handlers.handle_table_confirmation(
+                    confirmation, user_id
+                )
+            elif action_type == 'confirm_destination':
+                response = await confirmation_handlers.handle_destination_confirmation(
+                    confirmation, user_id
+                )
+            elif action_type == 'confirm_pipeline_create':
+                response = await confirmation_handlers.handle_pipeline_confirmation(
+                    confirmation, user_id
+                )
+            elif action_type == 'confirm_alert_config':
+                response = await confirmation_handlers.handle_alert_confirmation(
+                    confirmation, user_id
+                )
+            elif action_type == 'confirm_action':
+                response = await confirmation_handlers.handle_generic_confirmation(
+                    confirmation, user_id
+                )
+            else:
+                response = {
+                    'message': f"Unknown confirmation type: {action_type}",
+                    'actions': []
+                }
+
+            await sio.emit('chat_response', response, room=sid)
+            return
+
+        # Handle reprocess confirmation (legacy)
         if reprocess_confirmation:
             if reprocess_confirmation.get('confirmed'):
                 # User confirmed - call create_kafka_pipeline with force_reprocess=True
@@ -135,6 +181,8 @@ async def chat_message(sid, data):
         }, room=sid)
     except Exception as e:
         print(f"Error processing message: {e}")
+        import traceback
+        traceback.print_exc()
         await sio.emit('chat_response', {
             'message': f"Sorry, I encountered an error: {str(e)}",
             'actions': []

@@ -14,6 +14,7 @@ import {
   Trash2,
   Plug,
   GitBranch,
+  Bell,
 } from 'lucide-react';
 
 const connectors = [
@@ -90,6 +91,19 @@ export function Sidebar() {
               >
                 <GitBranch className="w-4 h-4 mr-3" />
                 Pipelines
+              </Button>
+            </Link>
+            <Link href="/dashboard/alerts">
+              <Button
+                variant="ghost"
+                className={`w-full justify-start ${
+                  isActive('/dashboard/alerts')
+                    ? 'text-foreground bg-sidebar-accent'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                <Bell className="w-4 h-4 mr-3" />
+                Alerts
               </Button>
             </Link>
           </div>

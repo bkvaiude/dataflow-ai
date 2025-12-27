@@ -90,19 +90,8 @@ class ApplyTemplateRequest(BaseModel):
         }
 
 
-# Dependency to get user_id
-from app.api.auth import get_session
-
-async def get_current_user_id(session: str = Query(None)) -> str:
-    """Get current authenticated user ID from session."""
-    if not session:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-
-    user_data = get_session(session)
-    if not user_data:
-        raise HTTPException(status_code=401, detail="Invalid session")
-
-    return user_data["id"]
+# ============== Auth Dependency ==============
+from app.utils.auth_dependencies import get_current_user_id
 
 
 @router.post("/", response_model=TemplateResponse, status_code=201)

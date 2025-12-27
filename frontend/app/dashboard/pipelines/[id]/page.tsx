@@ -4,12 +4,14 @@ import { useState, useEffect, useCallback } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { PipelineHealth, PipelineMetrics, PipelineControls } from '@/components/pipelines';
+import { EnrichmentList } from '@/components/enrichments/EnrichmentList';
 import type {
   Pipeline,
   PipelineHealth as PipelineHealthType,
   PipelineMetrics as PipelineMetricsType,
   PipelineEvent,
   PipelineStatus,
+  Enrichment,
 } from '@/types';
 import {
   ArrowLeft,
@@ -23,6 +25,7 @@ import {
   ChevronRight,
   AlertCircle,
   History,
+  Layers,
 } from 'lucide-react';
 import { useAuthStore } from '@/stores/authStore';
 import { formatDistanceToNow } from 'date-fns';
@@ -62,11 +65,12 @@ export default function PipelineDetailPage() {
   const params = useParams();
   const pipelineId = params.id as string;
   const { user } = useAuthStore();
-  const [session, setSession] = useState<string | null>(null);
+  const [accessToken, setAccessToken] = useState<string | null>(null);
 
   useEffect(() => {
-    const storedSession = localStorage.getItem('session');
-    setSession(storedSession);
+    // Use JWT access_token for authentication
+    const storedToken = localStorage.getItem('access_token');
+    setAccessToken(storedToken);
   }, []);
 
   // State
@@ -74,20 +78,26 @@ export default function PipelineDetailPage() {
   const [health, setHealth] = useState<PipelineHealthType | null>(null);
   const [metrics, setMetrics] = useState<PipelineMetricsType | null>(null);
   const [events, setEvents] = useState<PipelineEvent[]>([]);
+  const [enrichments, setEnrichments] = useState<Enrichment[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingHealth, setIsLoadingHealth] = useState(false);
   const [isLoadingMetrics, setIsLoadingMetrics] = useState(false);
   const [isLoadingEvents, setIsLoadingEvents] = useState(false);
+  const [isLoadingEnrichments, setIsLoadingEnrichments] = useState(false);
   const [activeTab, setActiveTab] = useState<TabType>('overview');
 
   const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
   // Fetch pipeline
   const fetchPipeline = useCallback(async () => {
-    if (!session || !pipelineId) return;
+    if (!accessToken || !pipelineId) return;
 
     try {
-      const response = await fetch(`${API_URL}/api/pipelines/${pipelineId}?session=${session}`);
+      const response = await fetch(`${API_URL}/api/pipelines/${pipelineId}`, {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+        },
+      });
       if (response.ok) {
         const data = await response.json();
         setPipeline({
@@ -119,15 +129,17 @@ export default function PipelineDetailPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [session, pipelineId, API_URL, router]);
+  }, [accessToken, pipelineId, API_URL, router]);
 
   // Fetch health
   const fetchHealth = useCallback(async () => {
-    if (!session || !pipelineId) return;
+    if (!accessToken || !pipelineId) return;
 
     setIsLoadingHealth(true);
     try {
-      const response = await fetch(`${API_URL}/api/pipelines/${pipelineId}/health?session=${session}`);
+      const response = await fetch(`${API_URL}/api/pipelines/${pipelineId}/health`, {
+        headers: { 'Authorization': `Bearer ${accessToken}` },
+      });
       if (response.ok) {
         const data = await response.json();
 
@@ -191,15 +203,17 @@ export default function PipelineDetailPage() {
     } finally {
       setIsLoadingHealth(false);
     }
-  }, [session, pipelineId, API_URL]);
+  }, [accessToken, pipelineId, API_URL]);
 
   // Fetch metrics
   const fetchMetrics = useCallback(async () => {
-    if (!session || !pipelineId) return;
+    if (!accessToken || !pipelineId) return;
 
     setIsLoadingMetrics(true);
     try {
-      const response = await fetch(`${API_URL}/api/pipelines/${pipelineId}/metrics?session=${session}`);
+      const response = await fetch(`${API_URL}/api/pipelines/${pipelineId}/metrics`, {
+        headers: { 'Authorization': `Bearer ${accessToken}` },
+      });
       if (response.ok) {
         const data = await response.json();
         setMetrics({
@@ -215,15 +229,17 @@ export default function PipelineDetailPage() {
     } finally {
       setIsLoadingMetrics(false);
     }
-  }, [session, pipelineId, API_URL]);
+  }, [accessToken, pipelineId, API_URL]);
 
   // Fetch events
   const fetchEvents = useCallback(async () => {
-    if (!session || !pipelineId) return;
+    if (!accessToken || !pipelineId) return;
 
     setIsLoadingEvents(true);
     try {
-      const response = await fetch(`${API_URL}/api/pipelines/${pipelineId}/events?session=${session}&limit=50`);
+      const response = await fetch(`${API_URL}/api/pipelines/${pipelineId}/events?limit=50`, {
+        headers: { 'Authorization': `Bearer ${accessToken}` },
+      });
       if (response.ok) {
         const data = await response.json();
         setEvents((data || []).map((e: Record<string, unknown>) => ({
@@ -240,15 +256,100 @@ export default function PipelineDetailPage() {
     } finally {
       setIsLoadingEvents(false);
     }
-  }, [session, pipelineId, API_URL]);
+  }, [accessToken, pipelineId, API_URL]);
+
+  // Fetch enrichments
+  const fetchEnrichments = useCallback(async () => {
+    if (!accessToken || !pipelineId) return;
+
+    setIsLoadingEnrichments(true);
+    try {
+      const response = await fetch(`${API_URL}/api/enrichments?pipeline_id=${pipelineId}`, {
+        headers: { 'Authorization': `Bearer ${accessToken}` },
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setEnrichments((data || []).map((e: Record<string, unknown>) => ({
+          id: e.id,
+          pipelineId: e.pipeline_id,
+          name: e.name,
+          description: e.description,
+          sourceStreamName: e.source_stream_name,
+          sourceTopic: e.source_topic,
+          lookupTables: e.lookup_tables || [],
+          joinType: e.join_type || 'LEFT',
+          joinKeys: e.join_keys || [],
+          outputColumns: e.output_columns || [],
+          outputStreamName: e.output_stream_name,
+          outputTopic: e.output_topic,
+          ksqldbQueryId: e.ksqldb_query_id,
+          status: e.status,
+          createdAt: e.created_at,
+          updatedAt: e.updated_at,
+          activatedAt: e.activated_at,
+        })));
+      }
+    } catch (error) {
+      console.error('Failed to fetch enrichments:', error);
+    } finally {
+      setIsLoadingEnrichments(false);
+    }
+  }, [accessToken, pipelineId, API_URL]);
+
+  // Enrichment actions
+  const handleActivateEnrichment = async (enrichmentId: string) => {
+    if (!accessToken) return;
+    try {
+      const response = await fetch(`${API_URL}/api/enrichments/${enrichmentId}/activate`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${accessToken}` },
+      });
+      if (response.ok) {
+        await fetchEnrichments();
+      }
+    } catch (error) {
+      console.error('Failed to activate enrichment:', error);
+    }
+  };
+
+  const handleDeactivateEnrichment = async (enrichmentId: string) => {
+    if (!accessToken) return;
+    try {
+      const response = await fetch(`${API_URL}/api/enrichments/${enrichmentId}/deactivate`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${accessToken}` },
+      });
+      if (response.ok) {
+        await fetchEnrichments();
+      }
+    } catch (error) {
+      console.error('Failed to deactivate enrichment:', error);
+    }
+  };
+
+  const handleDeleteEnrichment = async (enrichmentId: string) => {
+    if (!accessToken) return;
+    try {
+      const response = await fetch(`${API_URL}/api/enrichments/${enrichmentId}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${accessToken}` },
+      });
+      if (response.ok) {
+        await fetchEnrichments();
+      }
+    } catch (error) {
+      console.error('Failed to delete enrichment:', error);
+    }
+  };
 
   // Pipeline actions
   const handleStart = async () => {
-    if (!session || !pipelineId) return;
+    if (!accessToken || !pipelineId) return;
 
     try {
-      await fetch(`${API_URL}/api/pipelines/${pipelineId}/start?session=${session}`, {
+      await fetch(`${API_URL}/api/pipelines/${pipelineId}/start`, {
         method: 'POST',
+        headers: { 'Authorization': `Bearer ${accessToken}` },
       });
       await fetchPipeline();
     } catch (error) {
@@ -257,11 +358,12 @@ export default function PipelineDetailPage() {
   };
 
   const handleStop = async () => {
-    if (!session || !pipelineId) return;
+    if (!accessToken || !pipelineId) return;
 
     try {
-      await fetch(`${API_URL}/api/pipelines/${pipelineId}/stop?session=${session}`, {
+      await fetch(`${API_URL}/api/pipelines/${pipelineId}/stop`, {
         method: 'POST',
+        headers: { 'Authorization': `Bearer ${accessToken}` },
       });
       await fetchPipeline();
     } catch (error) {
@@ -270,11 +372,12 @@ export default function PipelineDetailPage() {
   };
 
   const handlePause = async () => {
-    if (!session || !pipelineId) return;
+    if (!accessToken || !pipelineId) return;
 
     try {
-      await fetch(`${API_URL}/api/pipelines/${pipelineId}/pause?session=${session}`, {
+      await fetch(`${API_URL}/api/pipelines/${pipelineId}/pause`, {
         method: 'POST',
+        headers: { 'Authorization': `Bearer ${accessToken}` },
       });
       await fetchPipeline();
     } catch (error) {
@@ -283,11 +386,12 @@ export default function PipelineDetailPage() {
   };
 
   const handleResume = async () => {
-    if (!session || !pipelineId) return;
+    if (!accessToken || !pipelineId) return;
 
     try {
-      await fetch(`${API_URL}/api/pipelines/${pipelineId}/resume?session=${session}`, {
+      await fetch(`${API_URL}/api/pipelines/${pipelineId}/resume`, {
         method: 'POST',
+        headers: { 'Authorization': `Bearer ${accessToken}` },
       });
       await fetchPipeline();
     } catch (error) {
@@ -296,11 +400,12 @@ export default function PipelineDetailPage() {
   };
 
   const handleDelete = async () => {
-    if (!session || !pipelineId) return;
+    if (!accessToken || !pipelineId) return;
 
     try {
-      const response = await fetch(`${API_URL}/api/pipelines/${pipelineId}?session=${session}`, {
+      const response = await fetch(`${API_URL}/api/pipelines/${pipelineId}`, {
         method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${accessToken}` },
       });
       if (response.ok) {
         router.push('/dashboard/pipelines');
@@ -312,10 +417,10 @@ export default function PipelineDetailPage() {
 
   // Initial fetch
   useEffect(() => {
-    if (user && session) {
+    if (user && accessToken) {
       fetchPipeline();
     }
-  }, [user, session, fetchPipeline]);
+  }, [user, accessToken, fetchPipeline]);
 
   // Fetch tab-specific data
   useEffect(() => {
@@ -327,8 +432,10 @@ export default function PipelineDetailPage() {
       fetchMetrics();
     } else if (activeTab === 'events') {
       fetchEvents();
+    } else if (activeTab === 'enrichments') {
+      fetchEnrichments();
     }
-  }, [activeTab, pipeline, fetchHealth, fetchMetrics, fetchEvents]);
+  }, [activeTab, pipeline, fetchHealth, fetchMetrics, fetchEvents, fetchEnrichments]);
 
   if (isLoading) {
     return (
@@ -537,6 +644,29 @@ export default function PipelineDetailPage() {
                 </div>
               </div>
 
+              {/* Template Info */}
+              {pipeline.templateId && (
+                <div className="p-4 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-start gap-3">
+                  <div className="w-10 h-10 rounded-lg bg-indigo-500/20 flex items-center justify-center shrink-0">
+                    <Layers className="w-5 h-5 text-indigo-400" />
+                  </div>
+                  <div className="flex-1">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-sm font-medium text-foreground">Pipeline Template</h4>
+                      <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                        Active
+                      </span>
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      This pipeline is using a transformation template
+                    </p>
+                    <code className="text-xs font-mono text-indigo-300 mt-2 block">
+                      ID: {pipeline.templateId}
+                    </code>
+                  </div>
+                </div>
+              )}
+
               {/* Error Message */}
               {pipeline.errorMessage && (
                 <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/20 flex items-start gap-3">
@@ -583,41 +713,14 @@ export default function PipelineDetailPage() {
 
         {/* Enrichments Tab */}
         {activeTab === 'enrichments' && (
-          <div className="p-6 rounded-2xl border border-white/10 bg-white/[0.02]">
-            <div className="flex items-center justify-between mb-6">
-              <div>
-                <h3 className="font-display font-semibold text-foreground">Stream Enrichments</h3>
-                <p className="text-sm text-muted-foreground mt-1">
-                  Enrich streaming data with lookup tables using stream-table JOINs
-                </p>
-              </div>
-              <Button
-                onClick={() => router.push(`/dashboard/pipelines/${pipelineId}/enrichments`)}
-                className="bg-gradient-to-r from-cyan-500 to-emerald-500 hover:from-cyan-600 hover:to-emerald-600 text-white gap-2"
-              >
-                <GitBranch className="w-4 h-4 rotate-180" />
-                Manage Enrichments
-              </Button>
-            </div>
-
-            <div className="text-center py-12">
-              <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-cyan-500/20 to-emerald-500/20 border border-cyan-500/30 flex items-center justify-center mx-auto mb-4">
-                <GitBranch className="w-8 h-8 text-cyan-400 rotate-180" />
-              </div>
-              <h4 className="text-lg font-medium text-foreground mb-2">Stream-Table JOINs</h4>
-              <p className="text-sm text-muted-foreground max-w-md mx-auto mb-6">
-                Add user details to login events, product info to orders, or combine any streaming data with reference tables in real-time.
-              </p>
-              <Button
-                variant="outline"
-                onClick={() => router.push(`/dashboard/pipelines/${pipelineId}/enrichments`)}
-                className="gap-2"
-              >
-                View Enrichments
-                <ChevronRight className="w-4 h-4" />
-              </Button>
-            </div>
-          </div>
+          <EnrichmentList
+            enrichments={enrichments}
+            isLoading={isLoadingEnrichments}
+            onActivate={handleActivateEnrichment}
+            onDeactivate={handleDeactivateEnrichment}
+            onDelete={handleDeleteEnrichment}
+            onCreateNew={() => router.push(`/dashboard/pipelines/${pipelineId}/enrichments/new`)}
+          />
         )}
 
         {/* Events Tab */}

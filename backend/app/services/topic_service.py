@@ -28,24 +28,21 @@ class TopicService:
         self._admin_client = None
 
     def _get_admin_client(self):
-        """Get or create Kafka AdminClient"""
-        if self._admin_client is None:
-            try:
-                from confluent_kafka.admin import AdminClient
+        """Get or create Kafka AdminClient - always creates fresh connection"""
+        try:
+            from confluent_kafka.admin import AdminClient
 
-                conf = {
-                    'bootstrap.servers': self.bootstrap_servers,
-                    'security.protocol': 'SASL_SSL',
-                    'sasl.mechanisms': 'PLAIN',
-                    'sasl.username': self.api_key,
-                    'sasl.password': self.api_secret
-                }
-                self._admin_client = AdminClient(conf)
-            except Exception as e:
-                print(f"[TOPIC] Failed to create AdminClient: {e}")
-                return None
-
-        return self._admin_client
+            conf = {
+                'bootstrap.servers': self.bootstrap_servers,
+                'security.protocol': 'SASL_SSL',
+                'sasl.mechanisms': 'PLAIN',
+                'sasl.username': self.api_key,
+                'sasl.password': self.api_secret
+            }
+            return AdminClient(conf)
+        except Exception as e:
+            print(f"[TOPIC] Failed to create AdminClient: {e}")
+            return None
 
     def _get_schema_registry_headers(self) -> Dict[str, str]:
         """Generate auth headers for Schema Registry"""
@@ -95,7 +92,7 @@ class TopicService:
             from confluent_kafka.admin import NewTopic
 
             admin = self._get_admin_client()
-            if not admin:
+            if admin is None:
                 raise Exception("Failed to create AdminClient")
 
             topic = NewTopic(
@@ -151,7 +148,7 @@ class TopicService:
 
         try:
             admin = self._get_admin_client()
-            if not admin:
+            if admin is None:
                 raise Exception("Failed to create AdminClient")
 
             # Get metadata
@@ -188,7 +185,7 @@ class TopicService:
 
         try:
             admin = self._get_admin_client()
-            if not admin:
+            if admin is None:
                 raise Exception("Failed to create AdminClient")
 
             futures = admin.delete_topics([topic_name])
@@ -215,18 +212,22 @@ class TopicService:
             List of topic names
         """
         if not self.is_configured():
+            print("[TOPIC] Not configured, returning empty list")
             return []
 
         try:
             admin = self._get_admin_client()
-            if not admin:
+            if admin is None:
+                print("[TOPIC] Failed to get admin client")
                 return []
 
-            cluster_metadata = admin.list_topics(timeout=10)
+            cluster_metadata = admin.list_topics(timeout=15)
             topics = list(cluster_metadata.topics.keys())
+            print(f"[TOPIC] Found {len(topics)} total topics")
 
             if prefix:
                 topics = [t for t in topics if t.startswith(prefix)]
+                print(f"[TOPIC] Filtered to {len(topics)} topics with prefix '{prefix}'")
 
             return topics
 
@@ -353,6 +354,7 @@ class TopicService:
     def list_subjects(self) -> List[str]:
         """List all schema subjects"""
         if not self.schema_registry_url:
+            print("[SCHEMA] Schema registry not configured")
             return []
 
         try:
@@ -362,7 +364,9 @@ class TopicService:
                 timeout=10.0
             )
             response.raise_for_status()
-            return response.json()
+            subjects = response.json()
+            print(f"[SCHEMA] Found {len(subjects)} subjects")
+            return subjects
 
         except Exception as e:
             print(f"[SCHEMA] Failed to list subjects: {str(e)}")

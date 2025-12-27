@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     # Credential Encryption
     credential_encryption_key: str = ""
 
+    # JWT Authentication
+    jwt_secret_key: str = ""
+    jwt_algorithm: str = "HS256"
+    jwt_access_token_expire_minutes: int = 60  # 1 hour
+    jwt_refresh_token_expire_days: int = 7  # 7 days
+
     # Confluent Cloud API (for managed connectors)
     confluent_cloud_api_key: str = ""
     confluent_cloud_api_secret: str = ""

@@ -1,22 +1,30 @@
 """
 Authentication API Routes
-Handles user authentication via Google OAuth.
+Handles user authentication via Google OAuth with JWT tokens.
 """
 
 import base64
 import json
 import secrets
 import httpx
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, HTTPException, Query, Response, Header, Depends
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 from typing import Optional
 from app.config import settings
 from app.services.db_service import db_service
+from app.utils.jwt_utils import (
+    create_access_token,
+    create_refresh_token,
+    verify_access_token,
+    verify_refresh_token,
+    revoke_refresh_token,
+    revoke_all_user_tokens,
+)
 
 router = APIRouter()
 
-# In-memory session store (use Redis in production)
+# In-memory session store (DEPRECATED - keeping for backward compatibility during migration)
 sessions: dict = {}
 
 
@@ -30,6 +38,17 @@ class UserResponse(BaseModel):
 class AuthStatusResponse(BaseModel):
     authenticated: bool
     user: Optional[UserResponse] = None
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    expires_in: int  # seconds
+
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
 
 
 def create_session(user_data: dict) -> str:
@@ -162,12 +181,21 @@ async def google_callback(
         # Save user to database
         db_service.create_user(user_data["id"], user_data)
 
-        # Create session (store tokens for Sheets access)
+        # Create JWT tokens for application authentication
+        access_token = create_access_token(user_data["id"], user_data["email"])
+        refresh_token, token_id = create_refresh_token(user_data["id"])
+
+        # Create session (DEPRECATED - for backward compatibility)
         session_id = create_session(user_data)
 
-        # Redirect to frontend with session token in URL
-        # Frontend will extract and store it in localStorage
-        return RedirectResponse(url=f"{frontend_url}/auth/callback?session={session_id}")
+        # Redirect to frontend with JWT tokens in URL
+        # Frontend will extract and store them in localStorage
+        return RedirectResponse(
+            url=f"{frontend_url}/auth/callback?"
+            f"access_token={access_token}&"
+            f"refresh_token={refresh_token}&"
+            f"session={session_id}"  # Keep for backward compatibility
+        )
 
     except Exception as e:
         print(f"Auth callback error: {e}")
@@ -202,8 +230,30 @@ async def logout(session: Optional[str] = Query(None)):
 
 
 @router.get("/me")
-async def get_current_user(session: Optional[str] = Query(None)):
-    """Get current authenticated user"""
+async def get_current_user(
+    session: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None)
+):
+    """Get current authenticated user (supports both JWT and legacy session)"""
+
+    # Try JWT authentication first
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.replace("Bearer ", "")
+        payload = verify_access_token(token)
+
+        if payload:
+            user_id = payload.get("sub")
+            # Get user from database
+            user = db_service.get_user(user_id)
+            if user:
+                return {
+                    "id": user.get("id"),
+                    "email": user.get("email"),
+                    "name": user.get("name"),
+                    "picture": user.get("picture"),
+                }
+
+    # Fallback to legacy session authentication
     if not session:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
@@ -218,6 +268,64 @@ async def get_current_user(session: Optional[str] = Query(None)):
         "name": user_data.get("name"),
         "picture": user_data.get("picture"),
     }
+
+
+@router.post("/refresh", response_model=TokenResponse)
+async def refresh_access_token(request: RefreshTokenRequest):
+    """
+    Refresh access token using refresh token.
+    Returns new access token and refresh token.
+    """
+    payload = verify_refresh_token(request.refresh_token)
+
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
+
+    user_id = payload.get("sub")
+
+    # Get user from database
+    user = db_service.get_user(user_id)
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    # Create new access token
+    new_access_token = create_access_token(user_id, user.get("email"))
+
+    # Create new refresh token (rotate refresh tokens for security)
+    new_refresh_token, new_token_id = create_refresh_token(user_id)
+
+    # Revoke old refresh token
+    old_token_id = payload.get("jti")
+    if old_token_id:
+        revoke_refresh_token(old_token_id)
+
+    return TokenResponse(
+        access_token=new_access_token,
+        refresh_token=new_refresh_token,
+        token_type="bearer",
+        expires_in=settings.jwt_access_token_expire_minutes * 60,
+    )
+
+
+@router.post("/logout-all")
+async def logout_all_devices(authorization: Optional[str] = Header(None)):
+    """
+    Logout from all devices by revoking all refresh tokens.
+    Requires valid access token.
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    token = authorization.replace("Bearer ", "")
+    payload = verify_access_token(token)
+
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    user_id = payload.get("sub")
+    count = revoke_all_user_tokens(user_id)
+
+    return {"success": True, "revoked_tokens": count}
 
 
 def get_user_tokens(user_id: str) -> Optional[dict]:

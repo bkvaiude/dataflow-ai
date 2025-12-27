@@ -1,13 +1,17 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { initializeSocket, sendChatMessage, disconnectSocket, isSocketConnected } from '@/lib/socket';
 import { useChatStore } from '@/stores/chatStore';
 import { useAuthStore } from '@/stores/authStore';
 import type { ChatAction } from '@/types';
 
+// Connection message from backend
+const CONNECTION_MESSAGE = 'Connected to DataFlow AI!';
+
 export function useSocket() {
   const [isConnected, setIsConnected] = useState(false);
+  const hasShownConnectionMessage = useRef(false);
   const { addMessage, setTyping } = useChatStore();
   const { user } = useAuthStore();
 
@@ -23,6 +27,16 @@ export function useSocket() {
       },
       onChatResponse: (data: { message: string; actions?: ChatAction[] }) => {
         setTyping(false);
+
+        // Skip duplicate connection messages on reconnection
+        if (data.message.startsWith(CONNECTION_MESSAGE)) {
+          if (hasShownConnectionMessage.current) {
+            console.log('Skipping duplicate connection message');
+            return;
+          }
+          hasShownConnectionMessage.current = true;
+        }
+
         addMessage({
           role: 'assistant',
           content: data.message,

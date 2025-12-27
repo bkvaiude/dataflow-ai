@@ -3,7 +3,7 @@
 import { useEffect } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuthStore } from '@/stores/authStore';
-import { checkAuthStatus } from '@/lib/firebase';
+import { checkAuthStatus, storeTokens } from '@/lib/firebase';
 
 export default function AuthCallbackPage() {
   const router = useRouter();
@@ -12,7 +12,9 @@ export default function AuthCallbackPage() {
 
   useEffect(() => {
     const handleCallback = async () => {
-      const session = searchParams.get('session');
+      const accessToken = searchParams.get('access_token');
+      const refreshToken = searchParams.get('refresh_token');
+      const session = searchParams.get('session'); // Legacy support
       const error = searchParams.get('error');
 
       if (error) {
@@ -21,6 +23,29 @@ export default function AuthCallbackPage() {
         return;
       }
 
+      // JWT authentication (preferred)
+      if (accessToken && refreshToken) {
+        // Store JWT tokens
+        storeTokens(accessToken, refreshToken);
+
+        // Also store legacy session for backward compatibility
+        if (session) {
+          localStorage.setItem('session', session);
+          document.cookie = `session=${session}; path=/; max-age=${60 * 60 * 24 * 7}`;
+        }
+
+        // Fetch user data from backend
+        const user = await checkAuthStatus();
+        if (user) {
+          setUser(user);
+          router.push('/dashboard');
+        } else {
+          router.push('/?error=auth_failed');
+        }
+        return;
+      }
+
+      // Legacy session authentication (fallback)
       if (session) {
         // Store session in localStorage
         localStorage.setItem('session', session);
@@ -36,9 +61,11 @@ export default function AuthCallbackPage() {
         } else {
           router.push('/?error=session_invalid');
         }
-      } else {
-        router.push('/?error=no_session');
+        return;
       }
+
+      // No authentication credentials provided
+      router.push('/?error=no_auth');
     };
 
     handleCallback();

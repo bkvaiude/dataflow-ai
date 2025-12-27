@@ -72,105 +72,123 @@ class GeminiService:
     def _get_system_prompt(self) -> str:
         return """You are DataFlow AI, a real-time data platform assistant that sets up both MARKETING ANALYTICS and DATABASE CDC (Change Data Capture) pipelines.
 
-## CRITICAL: Tool Execution Behavior
+## CRITICAL: Interactive Confirmation Workflow
 
-**YOU MUST EXECUTE MULTIPLE TOOLS IN SEQUENCE TO COMPLETE TASKS.**
+**USE STEP-BY-STEP CONFIRMATION FOR ALL DATA OPERATIONS.**
 
-When a user asks you to set up a CDC pipeline or connect to a database, you MUST:
-1. ACTUALLY CALL the tools, don't just describe what you would do
-2. CHAIN MULTIPLE TOOLS in a single response to complete the full task
-3. After each tool call, CONTINUE with the next logical tool
-4. DO NOT STOP after just one tool call - keep going until the task is complete
+You MUST use interactive workflows that get user confirmation before:
+- Storing credentials (use secure password form, NOT plain text in chat)
+- Selecting which tables to sync (let user choose from discovered tables)
+- Choosing destination (let user pick ClickHouse, Kafka, etc.)
+- Creating pipelines (show summary for user review)
+- Setting up alerts (let user configure days, hours, recipients)
 
-Example: If user says "Connect to my database and set up CDC for audit_logs":
-- First call store_credentials → get credential_id
-- Then call discover_schema with that credential_id → see tables
-- Then call check_cdc_readiness → verify database is ready
-- Then call create_cdc_pipeline with the tables → create pipeline
-- Then call create_alert_rule if user requested alerts
+**NEVER:**
+- Ask for passwords in chat text - use the secure credential form
+- Auto-select tables without user confirmation
+- Choose destinations without asking
+- Create pipelines without final review
+- Set up alerts with default values without asking
 
-**NEVER just say "I'll do X" without actually calling the tool.**
-**NEVER stop after one tool call if more steps are needed.**
+## Interactive Workflow Tools (ALWAYS USE THESE FIRST)
+
+### 1. start_cdc_pipeline_setup
+Use this when a user wants to set up a CDC/database pipeline.
+This initiates an interactive workflow:
+1. Shows secure credential form (password NOT in chat)
+2. Shows table selector after connection succeeds
+3. Shows destination picker
+4. Shows final pipeline summary for confirmation
+5. Optionally shows alert configuration
+
+**Example usage:**
+User: "Set up a pipeline for my PostgreSQL database at localhost"
+You: Call start_cdc_pipeline_setup with host, database, username
+→ User fills in password securely via UI form
+→ User selects tables they want to sync
+→ User chooses destination (ClickHouse/Kafka)
+→ User confirms final configuration
+→ Pipeline created!
+
+### 2. start_alert_setup
+Use this when a user wants to set up monitoring alerts.
+This initiates an interactive workflow:
+1. Shows alert type selector (gap detection, volume spike, etc.)
+2. Shows threshold configuration
+3. Shows schedule picker (days/hours)
+4. Shows recipient email input
+5. Creates alert with user-confirmed settings
+
+## Tool Descriptions
+
+### Marketing Analytics Tools:
+- list_available_connectors - Show supported marketing data sources
+- check_connector_status - Check if a marketing source is connected
+- initiate_oauth - Start OAuth authorization for marketing sources
+- create_kafka_pipeline - Start real-time streaming from marketing sources
+- generate_dashboard - Create dashboard from processed marketing data
+
+### CDC Read-Only Tools (for information gathering):
+- discover_schema - Explore database tables and columns
+- check_cdc_readiness - Validate PostgreSQL configuration
+- preview_sample_data - Preview data from a table
+- list_cdc_pipelines - List existing pipelines
+- get_pipeline_status - Check pipeline health
+
+### Pipeline Control Tools:
+- control_cdc_pipeline - Pause, resume, or stop a pipeline
+- list_alert_rules - List configured alert rules
+- test_alert - Send test alert notification
 
 ## What Makes You Special
-You create enterprise-grade streaming infrastructure for two types of data sources:
+You create enterprise-grade streaming infrastructure:
 
-### 1. Marketing Data Sources (OAuth-based)
+### Marketing Data Sources (OAuth-based)
 - Google Ads, Facebook Ads, Shopify (coming soon)
 - Kafka for real-time streaming
 - Flink for continuous metric calculations (ROAS, CPC, CTR)
 - Live dashboards that update automatically
 
-### 2. Database CDC Sources (PostgreSQL)
+### Database CDC Sources (PostgreSQL)
 - Change Data Capture from PostgreSQL databases
-- Real-time database replication
+- Real-time database replication via Debezium
 - Schema discovery and validation
-- CDC readiness checks with provider-specific instructions
-
-## Your Tools
-
-### Marketing Analytics Tools:
-1. list_available_connectors - Show supported marketing data sources
-2. check_connector_status - Check if a marketing source is connected
-3. initiate_oauth - Start OAuth authorization
-4. create_kafka_pipeline - Start real-time streaming from marketing sources
-5. generate_dashboard - Create dashboard from processed marketing data
-
-### CDC (Database) Tools:
-6. store_credentials - Store database credentials (checks for duplicates automatically)
-7. discover_schema - Explore database tables, columns, and CDC eligibility
-8. check_cdc_readiness - Validate PostgreSQL configuration for CDC
-9. preview_sample_data - Preview data from a table before creating pipeline
-10. create_cdc_pipeline - Create CDC pipeline for specified tables
-11. start_cdc_pipeline - Start the pipeline to begin streaming
-12. get_pipeline_status - Check pipeline health and metrics
-
-### Anomaly & Alert Tools:
-13. create_anomaly_template - Create template with volume/gap detection config
-14. create_alert_rule - Create email alerts for anomalies (can restrict to specific days)
-15. list_alert_rules - List configured alert rules
-16. test_alert - Send test alert to verify configuration
-
-### Enrichment Tools:
-17. create_enrichment - Create stream-table JOINs for data enrichment
-18. preview_enrichment - Preview enriched data before activating
-
-## Complete Task Flows (Execute ALL steps)
-
-### Database CDC Setup (execute all tools in sequence):
-1. store_credentials → Returns credential_id (or finds existing)
-2. discover_schema(credential_id) → Shows available tables
-3. check_cdc_readiness(credential_id) → Validates database config
-4. create_cdc_pipeline(credential_id, tables) → Creates pipeline
-5. start_cdc_pipeline(pipeline_id) → Starts streaming
-
-### CDC with Alerts (execute all tools in sequence):
-1-5. Same as above
-6. create_anomaly_template → Create detection configuration
-7. create_alert_rule(pipeline_id) → Set up notifications
+- Sink to ClickHouse for analytics
 
 ## Response Style
-- Be friendly and enthusiastic about real-time data streaming
-- Highlight the Kafka + Flink streaming architecture
-- For CDC: Explain the importance of logical replication and primary keys
-- Celebrate successful connections and validations
-- After each tool result, IMMEDIATELY proceed to the next tool
-- Keep text responses brief between tool calls
+- Be friendly and guide users through each step
+- Explain what each confirmation form is for
+- Never rush through the workflow - let users make decisions
+- Celebrate successful completions
+- If user provides all info upfront, still use the interactive tools
 
-## Provider-Specific CDC Guidance
-When checking CDC readiness, provide specific instructions for:
-- **AWS RDS**: Parameter groups and rds.logical_replication
-- **Supabase**: Dashboard-based configuration
-- **Google Cloud SQL**: cloudsql.logical_decoding flag
-- **Azure Database**: azure.replication_support parameter
-- **Self-Hosted**: postgresql.conf and wal_level setting
+## Example Conversation Flow
+
+User: "Connect my Postgres database at db.example.com to ClickHouse"
+
+You: "I'll help you set up a CDC pipeline to sync your PostgreSQL data to ClickHouse! Let me gather your connection details."
+[Call start_cdc_pipeline_setup with host="db.example.com"]
+
+Response shows: "Please enter your database password securely below"
+[User fills in the secure credential form]
+
+Response shows: "Found 10 tables. Please select which ones to sync"
+[User selects tables via checkboxes]
+
+Response shows: "Choose your destination"
+[User selects ClickHouse]
+
+Response shows: "Review your pipeline configuration"
+[User confirms creation]
+
+You: "Pipeline created successfully! Would you like to set up alerts?"
 
 ## Important Reminders
-- Marketing: Only Google Ads is currently available
-- CDC: Only PostgreSQL is currently supported
-- store_credentials automatically detects existing connections (no duplicates)
-- ALWAYS execute tools, don't just describe what you'll do
-- CHAIN tools until the user's full request is complete"""
+- ALWAYS use start_cdc_pipeline_setup for new database connections
+- ALWAYS use start_alert_setup for new alert configurations
+- NEVER ask for passwords in chat - the secure form handles it
+- NEVER auto-execute without user confirmation on destructive actions
+- User feedback from UI forms comes back automatically - you don't need to poll"""
 
     async def process_message(self, message: str, user_id: str) -> Dict[str, Any]:
         """Process a chat message and return a response"""
@@ -224,18 +242,49 @@ When checking CDC readiness, provide specific instructions for:
 
             # Extract the output from the last AI message
             output_messages = result.get("messages", [])
-            content = "I'm sorry, I couldn't process that request."
 
+            # Debug: Print all messages
+            print(f"[DEBUG] Total messages from agent: {len(output_messages)}")
+            for i, msg in enumerate(output_messages):
+                msg_type = getattr(msg, 'type', 'unknown')
+                msg_content = getattr(msg, 'content', '')[:200] if hasattr(msg, 'content') else 'no content'
+                print(f"[DEBUG] Message {i}: type={msg_type}, content={msg_content}...")
+            content = "I'm sorry, I couldn't process that request."
+            tool_outputs = []
+
+            # First, collect tool outputs and find AI response
+            for msg in output_messages:
+                msg_type = getattr(msg, 'type', None)
+                if msg_type == 'tool' and hasattr(msg, 'content') and msg.content:
+                    tool_outputs.append(msg.content)
+
+            # Get the final AI message
             for msg in reversed(output_messages):
                 if hasattr(msg, 'content') and msg.content:
-                    # Skip tool messages
-                    if hasattr(msg, 'type') and msg.type == 'tool':
+                    msg_type = getattr(msg, 'type', None)
+                    if msg_type == 'tool':
                         continue
                     content = msg.content
                     break
 
-            # Extract actions from the response
-            actions = self._extract_actions(content)
+            # Extract actions - first check tool outputs (primary source), then AI response
+            actions = []
+
+            print(f"[DEBUG] Tool outputs collected: {len(tool_outputs)}")
+            for i, to in enumerate(tool_outputs):
+                print(f"[DEBUG] Tool output {i}: {to[:300]}...")
+
+            # Check tool outputs for actions first
+            for tool_output in tool_outputs:
+                actions = self._extract_actions(tool_output)
+                if actions:
+                    print(f"[DEBUG] Actions extracted from tool output: {actions}")
+                    break
+
+            # If no actions from tools, check AI response
+            if not actions:
+                actions = self._extract_actions(content)
+                print(f"[DEBUG] Actions extracted from AI content: {actions}")
 
             return {
                 "content": content,
@@ -366,13 +415,87 @@ How can I help you today?""",
             "actions": []
         }
 
+    def _extract_json_object(self, content: str, start_idx: int) -> str:
+        """Extract a complete JSON object with balanced braces starting at start_idx"""
+        if start_idx >= len(content) or content[start_idx] != '{':
+            return ""
+
+        depth = 0
+        in_string = False
+        escape_next = False
+
+        for i in range(start_idx, len(content)):
+            char = content[i]
+
+            if escape_next:
+                escape_next = False
+                continue
+
+            if char == '\\':
+                escape_next = True
+                continue
+
+            if char == '"' and not escape_next:
+                in_string = not in_string
+                continue
+
+            if in_string:
+                continue
+
+            if char == '{':
+                depth += 1
+            elif char == '}':
+                depth -= 1
+                if depth == 0:
+                    return content[start_idx:i+1]
+
+        return ""
+
     def _extract_actions(self, content: str) -> List[Dict[str, Any]]:
         """Extract UI actions from agent response content"""
         actions = []
 
         content_lower = content.lower()
 
-        # Check for confirm_reprocess action (highest priority)
+        # Check for new interactive confirmation actions (highest priority)
+        confirmation_types = [
+            ('confirm_source_select', 'sourceContext'),
+            ('confirm_credentials', 'credentialContext'),
+            ('confirm_tables', 'tableContext'),
+            ('confirm_destination', 'destinationContext'),
+            ('confirm_pipeline_create', 'pipelineContext'),
+            ('confirm_alert_config', 'alertContext'),
+            ('confirm_action', 'actionContext'),
+        ]
+
+        for action_type, context_key in confirmation_types:
+            action_marker = f'"action_type": "{action_type}"'
+            if action_marker in content:
+                try:
+                    # Find the start of the JSON object containing this action
+                    marker_idx = content.find(action_marker)
+                    # Search backwards to find the opening brace
+                    start_idx = content.rfind('{', 0, marker_idx)
+                    if start_idx != -1:
+                        json_str = self._extract_json_object(content, start_idx)
+                        if json_str:
+                            data = json.loads(json_str)
+                            context_data = data.get(context_key) or data.get('credentialContext') or data.get('alertContext')
+
+                            if context_data:
+                                action = {
+                                    "type": action_type,
+                                    "label": action_type.replace('confirm_', '').replace('_', ' ').title(),
+                                }
+                                # Add context with camelCase key
+                                action[context_key] = context_data
+                                actions.append(action)
+                                return actions  # One confirmation at a time
+                except (json.JSONDecodeError, AttributeError) as e:
+                    print(f"Error parsing {action_type} action: {e}")
+                    pass
+
+        # Check for confirm_reprocess action (legacy)
         if '"action_type": "confirm_reprocess"' in content or 'already processed' in content_lower:
             # Try to extract confirmation data from content
             try:

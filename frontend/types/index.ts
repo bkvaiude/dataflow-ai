@@ -15,17 +15,136 @@ export interface ChatMessage {
   actions?: ChatAction[];
 }
 
+// Chat Action Types - Extended for Interactive Confirmations
+export type ChatActionType =
+  | 'oauth'
+  | 'link'
+  | 'button'
+  | 'confirm_reprocess'
+  // New confirmation types for interactive workflow
+  | 'confirm_source_select'    // Select existing data source or create new
+  | 'confirm_credentials'      // Secure credential form (fallback when no sources)
+  | 'confirm_destination'      // Choose sink (ClickHouse/Kafka)
+  | 'confirm_tables'           // Multi-select tables
+  | 'confirm_pipeline_create'  // Final pipeline confirmation
+  | 'confirm_alert_config'     // Alert settings form
+  | 'confirm_action';          // Generic yes/no confirmation
+
 export interface ChatAction {
-  type: 'oauth' | 'link' | 'button' | 'confirm_reprocess';
+  type: ChatActionType;
   provider?: string;
   url?: string;
   label: string;
   onClick?: () => void;
+  // Legacy reprocess confirmation data
   confirmationData?: {
     connectorId: string;
     customerId: string;
     userId: string;
   };
+  // New confirmation payloads
+  sourceContext?: SourceSelectContext;
+  credentialContext?: CredentialConfirmContext;
+  tableContext?: TableConfirmContext;
+  destinationContext?: DestinationConfirmContext;
+  pipelineContext?: PipelineConfirmContext;
+  alertContext?: AlertConfirmContext;
+  actionContext?: GenericActionContext;
+}
+
+// ============================================================================
+// Confirmation Context Types for Interactive Chat Flow
+// ============================================================================
+
+// Context for source selection (existing credentials or create new)
+export interface SourceSelectContext {
+  sessionId: string;
+  sourceType?: 'postgresql' | 'mysql';
+  message?: string;
+}
+
+// Context for secure credential collection
+export interface CredentialConfirmContext {
+  name: string;
+  sourceType: 'postgresql' | 'mysql';
+  host: string;
+  port: number;
+  database: string;
+  username: string;
+  // Note: password is NOT included - user enters it securely
+  sessionId: string;  // For tracking the workflow session
+}
+
+// Context for table selection
+export interface TableConfirmContext {
+  credentialId: string;
+  credentialName: string;
+  tables: Array<{
+    name: string;
+    schema: string;
+    rowCount: number;
+    cdcEligible: boolean;
+    issues?: string[];
+  }>;
+  recommendedTables?: string[];
+  sessionId: string;
+}
+
+// Context for destination selection
+export interface DestinationConfirmContext {
+  credentialId: string;
+  selectedTables: string[];
+  destinations: Array<{
+    type: 'clickhouse' | 'kafka' | 's3';
+    name: string;
+    description: string;
+    available: boolean;
+    recommended?: boolean;
+  }>;
+  sessionId: string;
+}
+
+// Context for final pipeline confirmation
+export interface PipelineConfirmContext {
+  credentialId: string;
+  credentialName: string;
+  host: string;
+  database: string;
+  selectedTables: string[];
+  sinkType: 'clickhouse' | 'kafka' | 's3';
+  suggestedName: string;
+  sessionId: string;
+}
+
+// Context for alert configuration
+export interface AlertConfirmContext {
+  pipelineId: string;
+  pipelineName: string;
+  suggestedName: string;
+  ruleTypes: Array<{
+    type: AlertRuleType;
+    name: string;
+    description: string;
+    recommended?: boolean;
+  }>;
+  defaultConfig: {
+    severity: AlertSeverity;
+    enabledDays: number[];
+    enabledHours: { start: number; end: number };
+    cooldownMinutes: number;
+  };
+  sessionId: string;
+}
+
+// Context for generic yes/no actions
+export interface GenericActionContext {
+  actionId: string;
+  title: string;
+  description: string;
+  confirmLabel: string;
+  cancelLabel: string;
+  variant: 'default' | 'warning' | 'danger';
+  metadata?: Record<string, unknown>;
 }
 
 // Connector types
@@ -375,4 +494,75 @@ export interface EnrichmentMetrics {
   messagesPerSecond?: number;
   lagMs?: number;
   lastProcessedAt?: string;
+}
+
+// ============================================================================
+// Alert Types
+// ============================================================================
+
+export type AlertRuleType = 'volume_spike' | 'volume_drop' | 'gap_detection' | 'null_ratio';
+export type AlertSeverity = 'info' | 'warning' | 'critical';
+
+export interface AlertRule {
+  id: string;
+  userId: string;
+  pipelineId: string;
+  name: string;
+  description?: string;
+  ruleType: AlertRuleType;
+  thresholdConfig: {
+    // For volume_spike/drop
+    windowMinutes?: number;
+    multiplier?: number;  // spike
+    ratio?: number;       // drop
+    // For gap_detection
+    gapMinutes?: number;
+    // For null_ratio
+    columnName?: string;
+    nullThreshold?: number;
+  };
+  severity: AlertSeverity;
+  recipients: string[];
+  enabledDays: number[];  // 0-6 (Sun-Sat)
+  enabledHours: { start: number; end: number };
+  cooldownMinutes: number;
+  isActive: boolean;
+  lastTriggeredAt?: string;
+  triggerCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AlertHistory {
+  id: string;
+  ruleId: string;
+  pipelineId: string;
+  anomalyType: string;
+  anomalyDetails: Record<string, unknown>;
+  severity: AlertSeverity;
+  triggeredAt: string;
+  emailSent: boolean;
+  emailError?: string;
+}
+
+export interface AlertStats {
+  totalRules: number;
+  activeRules: number;
+  alertsToday: number;
+  alertsThisWeek: number;
+  bySeverity: { info: number; warning: number; critical: number };
+}
+
+export interface CreateAlertRuleRequest {
+  pipelineId: string;
+  name: string;
+  description?: string;
+  ruleType: AlertRuleType;
+  thresholdConfig: AlertRule['thresholdConfig'];
+  severity: AlertSeverity;
+  recipients: string[];
+  enabledDays?: number[];
+  enabledHours?: { start: number; end: number };
+  cooldownMinutes?: number;
+  isActive?: boolean;
 }

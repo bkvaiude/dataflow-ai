@@ -33,6 +33,7 @@ class User(Base):
     pipeline_templates = relationship("PipelineTemplate", back_populates="user", cascade="all, delete-orphan")
     pipelines = relationship("Pipeline", back_populates="user", cascade="all, delete-orphan")
     enrichments = relationship("EnrichmentConfig", back_populates="user", cascade="all, delete-orphan")
+    refresh_tokens = relationship("RefreshToken", back_populates="user", cascade="all, delete-orphan")
 
     def to_dict(self):
         return {
@@ -42,6 +43,32 @@ class User(Base):
             "picture": self.picture,
             "created_at": to_iso_utc(self.created_at),
             "updated_at": to_iso_utc(self.updated_at),
+        }
+
+
+class RefreshToken(Base):
+    """Refresh Token model - stores JWT refresh tokens for revocation"""
+    __tablename__ = "refresh_tokens"
+
+    id = Column(String(255), primary_key=True)  # Unique token ID (jti)
+    user_id = Column(String(255), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    token_hash = Column(String(255), nullable=False, unique=True)  # SHA256 hash of token
+    expires_at = Column(DateTime, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    revoked_at = Column(DateTime, nullable=True)
+    is_revoked = Column(Boolean, default=False, index=True)
+
+    # Relationships
+    user = relationship("User", back_populates="refresh_tokens")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "expires_at": to_iso_utc(self.expires_at),
+            "created_at": to_iso_utc(self.created_at),
+            "is_revoked": self.is_revoked,
+            "revoked_at": to_iso_utc(self.revoked_at),
         }
 
 
@@ -253,6 +280,7 @@ class Pipeline(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     started_at = Column(DateTime, nullable=True)
     stopped_at = Column(DateTime, nullable=True)
+    deleted_at = Column(DateTime, nullable=True)  # Soft delete timestamp
 
     # Relationships
     user = relationship("User", back_populates="pipelines")
@@ -281,6 +309,7 @@ class Pipeline(Base):
             "updated_at": to_iso_utc(self.updated_at),
             "started_at": to_iso_utc(self.started_at),
             "stopped_at": to_iso_utc(self.stopped_at),
+            "deleted_at": to_iso_utc(self.deleted_at),
         }
 
 

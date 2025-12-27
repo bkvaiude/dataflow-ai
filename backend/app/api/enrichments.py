@@ -163,19 +163,7 @@ class EnrichmentValidationResponse(BaseModel):
 
 
 # ============== Auth Dependency ==============
-
-async def get_current_user_id(session: str = Query(None)) -> str:
-    """Get current user ID from session"""
-    from app.api.auth import get_session
-
-    if not session:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-
-    user_data = get_session(session)
-    if not user_data:
-        raise HTTPException(status_code=401, detail="Invalid session")
-
-    return user_data["id"]
+from app.utils.auth_dependencies import get_current_user_id
 
 
 # ============== Helper Functions ==============

@@ -76,19 +76,7 @@ class PipelineEventResponse(BaseModel):
 
 
 # ============== Auth Dependency ==============
-
-async def get_current_user_id(session: str = Query(None)) -> str:
-    """Get current user ID from session"""
-    from app.api.auth import get_session
-
-    if not session:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-
-    user_data = get_session(session)
-    if not user_data:
-        raise HTTPException(status_code=401, detail="Invalid session")
-
-    return user_data["id"]
+from app.utils.auth_dependencies import get_current_user_id
 
 
 # ============== Helper Functions ==============
@@ -159,13 +147,14 @@ async def create_pipeline(
 
 @router.get("/", response_model=List[PipelineResponse])
 async def list_pipelines(user_id: str = Depends(get_current_user_id)):
-    """List all pipelines for the current user"""
+    """List all active pipelines for the current user (excludes deleted)"""
     from app.db.models import Pipeline
 
     session = get_db_session()
     try:
         pipelines = session.query(Pipeline).filter(
-            Pipeline.user_id == user_id
+            Pipeline.user_id == user_id,
+            Pipeline.deleted_at.is_(None)  # Exclude soft-deleted
         ).order_by(Pipeline.created_at.desc()).all()
 
         return [PipelineResponse(**p.to_dict()) for p in pipelines]
@@ -179,14 +168,15 @@ async def get_pipeline(
     pipeline_id: str,
     user_id: str = Depends(get_current_user_id)
 ):
-    """Get a specific pipeline"""
+    """Get a specific pipeline (excludes deleted)"""
     from app.db.models import Pipeline
 
     session = get_db_session()
     try:
         pipeline = session.query(Pipeline).filter(
             Pipeline.id == pipeline_id,
-            Pipeline.user_id == user_id
+            Pipeline.user_id == user_id,
+            Pipeline.deleted_at.is_(None)  # Exclude soft-deleted
         ).first()
 
         if not pipeline:
@@ -211,7 +201,8 @@ async def update_pipeline(
     try:
         pipeline = session.query(Pipeline).filter(
             Pipeline.id == pipeline_id,
-            Pipeline.user_id == user_id
+            Pipeline.user_id == user_id,
+            Pipeline.deleted_at.is_(None)  # Exclude soft-deleted
         ).first()
 
         if not pipeline:
@@ -256,37 +247,155 @@ async def delete_pipeline(
     pipeline_id: str,
     user_id: str = Depends(get_current_user_id)
 ):
-    """Delete a pipeline"""
-    from app.db.models import Pipeline
+    """
+    Soft delete a pipeline and cleanup all external resources.
+
+    - Keeps pipeline and events in database for history
+    - Cleans up Kafka topics, ksqlDB resources, connectors for cost optimization
+    """
+    from app.db.models import Pipeline, EnrichmentConfig
     from app.services.confluent_connector_service import confluent_connector_service
+    from app.services.topic_service import topic_service
+    from app.services.ksqldb_service import ksqldb_service
 
     session = get_db_session()
+    cleanup_results = {
+        "connectors": [],
+        "enrichments": [],
+        "topics": [],
+        "schema_subjects": [],
+        "ksqldb_resources": [],
+        "errors": []
+    }
+
     try:
         pipeline = session.query(Pipeline).filter(
             Pipeline.id == pipeline_id,
-            Pipeline.user_id == user_id
+            Pipeline.user_id == user_id,
+            Pipeline.deleted_at.is_(None)  # Only find non-deleted pipelines
         ).first()
 
         if not pipeline:
             raise HTTPException(status_code=404, detail="Pipeline not found")
 
-        # Delete connectors if they exist
+        server_name = f"dataflow_{pipeline_id[:8]}"
+        print(f"[PIPELINE] Starting cleanup for pipeline {pipeline_id}")
+
+        # 1. Cleanup enrichments (deactivate ksqlDB resources)
+        enrichments = session.query(EnrichmentConfig).filter(
+            EnrichmentConfig.pipeline_id == pipeline_id
+        ).all()
+
+        for enrichment in enrichments:
+            try:
+                # Terminate ksqlDB query if active
+                if enrichment.status == 'active' and enrichment.ksqldb_query_id:
+                    try:
+                        await ksqldb_service.terminate_query(enrichment.ksqldb_query_id)
+                        cleanup_results["ksqldb_resources"].append(f"query:{enrichment.ksqldb_query_id}")
+                        print(f"[PIPELINE] Terminated ksqlDB query: {enrichment.ksqldb_query_id}")
+                    except Exception as e:
+                        cleanup_results["errors"].append(f"Query {enrichment.ksqldb_query_id}: {e}")
+
+                # Drop output stream (with topic)
+                if enrichment.output_stream_name:
+                    try:
+                        await ksqldb_service.drop_stream(enrichment.output_stream_name, delete_topic=True)
+                        cleanup_results["ksqldb_resources"].append(f"stream:{enrichment.output_stream_name}")
+                    except Exception as e:
+                        cleanup_results["errors"].append(f"Stream {enrichment.output_stream_name}: {e}")
+
+                # Drop source stream
+                if enrichment.source_stream_name:
+                    try:
+                        await ksqldb_service.drop_stream(enrichment.source_stream_name)
+                        cleanup_results["ksqldb_resources"].append(f"stream:{enrichment.source_stream_name}")
+                    except Exception as e:
+                        cleanup_results["errors"].append(f"Stream {enrichment.source_stream_name}: {e}")
+
+                # Drop lookup tables
+                if enrichment.lookup_tables:
+                    for table_config in enrichment.lookup_tables:
+                        table_name = table_config.get('ksqldb_table')
+                        if table_name:
+                            try:
+                                await ksqldb_service.drop_table(table_name)
+                                cleanup_results["ksqldb_resources"].append(f"table:{table_name}")
+                            except Exception as e:
+                                cleanup_results["errors"].append(f"Table {table_name}: {e}")
+
+                # Mark enrichment as stopped
+                enrichment.status = 'stopped'
+                cleanup_results["enrichments"].append(enrichment.id)
+                print(f"[PIPELINE] Cleaned up enrichment: {enrichment.id}")
+
+            except Exception as e:
+                cleanup_results["errors"].append(f"Enrichment {enrichment.id}: {e}")
+
+        # 2. Delete Kafka topics (list by prefix and delete)
+        try:
+            all_topics = topic_service.list_topics(prefix=server_name)
+            enriched_topics = topic_service.list_topics(prefix=f"enriched_{pipeline_id[:8]}")
+            topics_to_delete = list(set(all_topics + enriched_topics))
+
+            for topic in topics_to_delete:
+                try:
+                    topic_service.delete_topic(topic)
+                    cleanup_results["topics"].append(topic)
+                    print(f"[PIPELINE] Deleted topic: {topic}")
+                except Exception as e:
+                    cleanup_results["errors"].append(f"Topic {topic}: {e}")
+
+        except Exception as e:
+            cleanup_results["errors"].append(f"Topic listing: {e}")
+
+        # 3. Delete Schema Registry subjects
+        try:
+            subjects = topic_service.list_subjects()
+            pipeline_subjects = [s for s in subjects if server_name in s]
+
+            for subject in pipeline_subjects:
+                try:
+                    topic_service.delete_subject(subject, permanent=True)
+                    cleanup_results["schema_subjects"].append(subject)
+                    print(f"[PIPELINE] Deleted schema subject: {subject}")
+                except Exception as e:
+                    cleanup_results["errors"].append(f"Subject {subject}: {e}")
+
+        except Exception as e:
+            cleanup_results["errors"].append(f"Schema subjects: {e}")
+
+        # 4. Delete connectors
         if pipeline.source_connector_name:
             try:
                 confluent_connector_service.delete_connector(pipeline.source_connector_name)
+                cleanup_results["connectors"].append(pipeline.source_connector_name)
+                print(f"[PIPELINE] Deleted source connector: {pipeline.source_connector_name}")
             except Exception as e:
-                print(f"[PIPELINE] Failed to delete source connector: {e}")
+                cleanup_results["errors"].append(f"Source connector: {e}")
 
         if pipeline.sink_connector_name:
             try:
                 confluent_connector_service.delete_connector(pipeline.sink_connector_name)
+                cleanup_results["connectors"].append(pipeline.sink_connector_name)
+                print(f"[PIPELINE] Deleted sink connector: {pipeline.sink_connector_name}")
             except Exception as e:
-                print(f"[PIPELINE] Failed to delete sink connector: {e}")
+                cleanup_results["errors"].append(f"Sink connector: {e}")
 
-        session.delete(pipeline)
+        # 5. Soft delete - keep history but mark as deleted
+        pipeline.deleted_at = datetime.utcnow()
+        pipeline.status = "deleted"
+        pipeline.source_connector_name = None
+        pipeline.sink_connector_name = None
+
         session.commit()
 
-        return {"message": "Pipeline deleted successfully"}
+        print(f"[PIPELINE] Soft deleted pipeline {pipeline_id}. Cleanup: {cleanup_results}")
+
+        return {
+            "message": "Pipeline deleted successfully",
+            "cleanup": cleanup_results
+        }
 
     except HTTPException:
         raise
@@ -313,7 +422,8 @@ async def start_pipeline(
     try:
         pipeline = session.query(Pipeline).filter(
             Pipeline.id == pipeline_id,
-            Pipeline.user_id == user_id
+            Pipeline.user_id == user_id,
+            Pipeline.deleted_at.is_(None)  # Exclude soft-deleted
         ).first()
 
         if not pipeline:
@@ -376,7 +486,8 @@ async def stop_pipeline(
     try:
         pipeline = session.query(Pipeline).filter(
             Pipeline.id == pipeline_id,
-            Pipeline.user_id == user_id
+            Pipeline.user_id == user_id,
+            Pipeline.deleted_at.is_(None)  # Exclude soft-deleted
         ).first()
 
         if not pipeline:
@@ -432,7 +543,8 @@ async def pause_pipeline(
     try:
         pipeline = session.query(Pipeline).filter(
             Pipeline.id == pipeline_id,
-            Pipeline.user_id == user_id
+            Pipeline.user_id == user_id,
+            Pipeline.deleted_at.is_(None)  # Exclude soft-deleted
         ).first()
 
         if not pipeline:
@@ -478,7 +590,8 @@ async def resume_pipeline(
     try:
         pipeline = session.query(Pipeline).filter(
             Pipeline.id == pipeline_id,
-            Pipeline.user_id == user_id
+            Pipeline.user_id == user_id,
+            Pipeline.deleted_at.is_(None)  # Exclude soft-deleted
         ).first()
 
         if not pipeline:
@@ -526,7 +639,8 @@ async def get_pipeline_health(
         # Verify ownership
         pipeline = session.query(Pipeline).filter(
             Pipeline.id == pipeline_id,
-            Pipeline.user_id == user_id
+            Pipeline.user_id == user_id,
+            Pipeline.deleted_at.is_(None)  # Exclude soft-deleted
         ).first()
 
         if not pipeline:
@@ -558,7 +672,8 @@ async def get_pipeline_metrics(
         # Verify ownership
         pipeline = session.query(Pipeline).filter(
             Pipeline.id == pipeline_id,
-            Pipeline.user_id == user_id
+            Pipeline.user_id == user_id,
+            Pipeline.deleted_at.is_(None)  # Exclude soft-deleted
         ).first()
 
         if not pipeline:

@@ -1906,30 +1906,180 @@ def generate_dashboard(use_real_data: bool = True) -> str:
     return json.dumps(result, indent=2)
 
 
+# ============================================================================
+# Interactive Confirmation Tools
+# These tools return UI actions for step-by-step user confirmation
+# ============================================================================
+
+@tool
+def start_cdc_pipeline_setup(
+    source_type: str = "postgresql"
+) -> str:
+    """
+    Start an interactive CDC pipeline setup workflow.
+
+    IMPORTANT: Use this tool when a user wants to set up a CDC/database pipeline.
+    This initiates a step-by-step confirmation flow where the user:
+    1. FIRST selects an existing data source OR creates a new one
+    2. Selects which tables to sync
+    3. Chooses a destination (ClickHouse, Kafka)
+    4. Reviews and confirms the pipeline configuration
+    5. Optionally configures alerts
+
+    Args:
+        source_type: Type of source - 'postgresql' or 'mysql' (default: postgresql)
+
+    Returns:
+        JSON with action_type 'confirm_source_select' that shows existing data sources
+    """
+    import uuid
+
+    session_id = str(uuid.uuid4())
+
+    # Return source selection action - show existing data sources first
+    return json.dumps({
+        "status": "pending_confirmation",
+        "action_type": "confirm_source_select",
+        "message": "Let's set up your CDC pipeline! First, select an existing data source or create a new one:",
+        "sourceContext": {
+            "sourceType": source_type,
+            "sessionId": session_id
+        }
+    }, indent=2)
+
+
+@tool
+def start_alert_setup(
+    pipeline_id: str = "",
+    pipeline_name: str = ""
+) -> str:
+    """
+    Start an interactive alert configuration workflow.
+
+    Use this tool when a user wants to set up monitoring alerts for a pipeline.
+    This initiates a step-by-step confirmation flow where the user:
+    1. Selects alert type (gap detection, volume spike, etc.)
+    2. Configures thresholds
+    3. Sets up schedule (days/hours)
+    4. Adds email recipients
+
+    Args:
+        pipeline_id: ID of the pipeline to monitor
+        pipeline_name: Name of the pipeline (alternative to ID)
+
+    Returns:
+        JSON with action_type 'confirm_alert_config' that triggers the alert configuration form
+    """
+    import uuid
+    from app.db.models import Pipeline
+    from app.services.db_service import db_service
+
+    user_id = get_user_context()
+    session_id = str(uuid.uuid4())
+
+    # Find pipeline
+    session = db_service._get_session()
+    try:
+        if pipeline_name and not pipeline_id:
+            pipeline = session.query(Pipeline).filter(
+                Pipeline.user_id == user_id,
+                Pipeline.name == pipeline_name
+            ).first()
+        else:
+            pipeline = session.query(Pipeline).filter(
+                Pipeline.id == pipeline_id,
+                Pipeline.user_id == user_id
+            ).first()
+
+        if not pipeline:
+            return json.dumps({
+                "status": "error",
+                "message": "Pipeline not found. Please provide a valid pipeline ID or name."
+            }, indent=2)
+
+        # Return confirmation action for alert configuration
+        return json.dumps({
+            "status": "pending_confirmation",
+            "action_type": "confirm_alert_config",
+            "message": f"Let's set up monitoring alerts for '{pipeline.name}'. Please configure your alert settings below:",
+            "alertContext": {
+                "pipelineId": pipeline.id,
+                "pipelineName": pipeline.name,
+                "suggestedName": f"{pipeline.name} Monitor",
+                "ruleTypes": [
+                    {
+                        "type": "gap_detection",
+                        "name": "Gap Detection",
+                        "description": "Alert when no events are received for a period",
+                        "recommended": True
+                    },
+                    {
+                        "type": "volume_spike",
+                        "name": "Volume Spike",
+                        "description": "Alert when event volume exceeds baseline",
+                        "recommended": False
+                    },
+                    {
+                        "type": "volume_drop",
+                        "name": "Volume Drop",
+                        "description": "Alert when event volume drops significantly",
+                        "recommended": False
+                    },
+                    {
+                        "type": "null_ratio",
+                        "name": "NULL Ratio",
+                        "description": "Alert when NULL values exceed threshold",
+                        "recommended": False
+                    }
+                ],
+                "defaultConfig": {
+                    "severity": "warning",
+                    "enabledDays": [0, 1, 2, 3, 4],
+                    "enabledHours": {"start": 9, "end": 17},
+                    "cooldownMinutes": 30
+                },
+                "sessionId": session_id
+            }
+        }, indent=2)
+
+    finally:
+        session.close()
+
+
 def get_all_tools() -> list:
     """Get all LangChain tools for the agent."""
     return [
+        # Interactive workflow tools (PREFER THESE for user-facing tasks)
+        start_cdc_pipeline_setup,  # Use for CDC pipeline setup - step-by-step
+        start_alert_setup,         # Use for alert configuration - step-by-step
+
+        # Marketing tools
         list_available_connectors,
         check_connector_status,
         initiate_oauth,
         create_kafka_pipeline,
         generate_dashboard,
+
+        # CDC tools (for programmatic use or after confirmation)
         store_credentials,
         discover_schema,
         check_cdc_readiness,
         preview_sample_data,
+
         # Phase 3: CDC Pipeline tools
         create_cdc_pipeline,
         start_cdc_pipeline,
         get_pipeline_status,
         control_cdc_pipeline,
         list_cdc_pipelines,
+
         # Phase 4: Enrichment tools
         create_enrichment,
         preview_enrichment,
         list_available_lookups,
         get_enrichment_status,
         control_enrichment,
+
         # Phase 5: Anomaly Detection & Alerting tools
         create_anomaly_template,
         create_alert_rule,
