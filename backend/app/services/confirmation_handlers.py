@@ -48,6 +48,7 @@ class ConfirmationHandlers:
         Process source selection.
 
         User either selected an existing credential or chose to create a new one.
+        This is Step 1 of the pipeline creation flow.
         """
         if data.get('cancelled'):
             return {
@@ -66,8 +67,8 @@ class ConfirmationHandlers:
             }
 
         # User selected an existing credential
-        credential_id = data.get('credentialId')
-        credential_name = data.get('credentialName')
+        credential_id = data.get('credentialId') or data.get('credential_id')
+        credential_name = data.get('credentialName') or data.get('credential_name') or data.get('name')
         host = data.get('host')
         database = data.get('database')
 
@@ -76,6 +77,8 @@ class ConfirmationHandlers:
                 'message': "Please select a data source to continue.",
                 'actions': []
             }
+
+        print(f"[SOURCE_SELECT] Storing credential_id: {credential_id}, name: {credential_name}, database: {database}")
 
         # Store credential info in session
         session['credential_id'] = credential_id
@@ -237,7 +240,7 @@ class ConfirmationHandlers:
         """
         Process table selection.
 
-        After tables are selected, returns destination selection action.
+        After tables are selected, check for filter requirement or proceed to destination.
         """
         if data.get('cancelled'):
             session_id = data.get('sessionId')
@@ -264,6 +267,15 @@ class ConfirmationHandlers:
         session['selected_tables'] = selected_tables
         session['credential_id'] = credential_id
         session['steps_completed'].append('tables')
+
+        # Check if there's a filter requirement stored in session (from AI context)
+        filter_requirement = session.get('filter_requirement')
+        if filter_requirement:
+            # Proceed to filter confirmation
+            return {
+                'message': f"Great! You've selected {len(selected_tables)} table(s). I noticed you want to filter data. Let me show you the filter options.",
+                'actions': []  # AI will handle filter confirmation
+            }
 
         # Return destination selection action
         return {
@@ -300,6 +312,216 @@ class ConfirmationHandlers:
                     'sessionId': session_id
                 }
             }]
+        }
+
+    async def handle_filter_confirmation(
+        self,
+        data: Dict[str, Any],
+        user_id: str
+    ) -> Dict[str, Any]:
+        """
+        Process filter confirmation.
+
+        After filter is confirmed, proceed to schema validation or destination.
+        """
+        if data.get('cancelled'):
+            session_id = data.get('sessionId')
+            session = self._get_session(session_id) if session_id else {}
+            # User wants no filter - proceed without filter
+            session['filter_applied'] = False
+            return {
+                'message': "No filter applied. All rows will be synced. Proceeding to destination selection.",
+                'actions': []
+            }
+
+        session_id = data.get('sessionId', str(uuid.uuid4()))
+        session = self._get_session(session_id)
+
+        # Store filter configuration
+        filter_sql = data.get('filter_sql', data.get('filterSql', ''))
+        session['filter_sql'] = filter_sql
+        session['filter_applied'] = True
+        session['filtered_row_count'] = data.get('filtered_row_count', data.get('filteredRowCount', 0))
+        session['steps_completed'].append('filter')
+
+        credential_id = session.get('credential_id') or data.get('credentialId')
+        selected_tables = session.get('selected_tables', [])
+
+        # Proceed to destination selection
+        return {
+            'message': f"Filter applied: `{filter_sql}`. Now, where would you like to sync this filtered data?",
+            'actions': [{
+                'type': 'confirm_destination',
+                'label': 'Choose Destination',
+                'destinationContext': {
+                    'credentialId': credential_id,
+                    'selectedTables': selected_tables,
+                    'filterApplied': True,
+                    'filterSql': filter_sql,
+                    'destinations': [
+                        {
+                            'type': 'clickhouse',
+                            'name': 'ClickHouse',
+                            'description': 'Fast analytics database for real-time queries and dashboards',
+                            'available': True,
+                            'recommended': True
+                        },
+                        {
+                            'type': 'kafka',
+                            'name': 'Kafka Topic',
+                            'description': 'Stream to Kafka for custom downstream processing',
+                            'available': True,
+                            'recommended': False
+                        }
+                    ],
+                    'sessionId': session_id
+                }
+            }]
+        }
+
+    async def handle_schema_confirmation(
+        self,
+        data: Dict[str, Any],
+        user_id: str
+    ) -> Dict[str, Any]:
+        """
+        Process schema/column selection confirmation.
+
+        After columns are selected, proceed to destination.
+        """
+        if data.get('cancelled'):
+            return {
+                'message': "Schema selection cancelled. Using all columns.",
+                'actions': []
+            }
+
+        session_id = data.get('sessionId', str(uuid.uuid4()))
+        session = self._get_session(session_id)
+
+        # Store selected columns
+        selected_columns = data.get('columns', data.get('selectedColumns', []))
+        session['selected_columns'] = selected_columns
+        session['steps_completed'].append('schema')
+
+        credential_id = session.get('credential_id') or data.get('credentialId')
+        selected_tables = session.get('selected_tables', [])
+
+        # Proceed to destination selection
+        return {
+            'message': f"Schema confirmed with {len(selected_columns)} columns. Now, where would you like to sync this data?",
+            'actions': [{
+                'type': 'confirm_destination',
+                'label': 'Choose Destination',
+                'destinationContext': {
+                    'credentialId': credential_id,
+                    'selectedTables': selected_tables,
+                    'selectedColumns': selected_columns,
+                    'destinations': [
+                        {
+                            'type': 'clickhouse',
+                            'name': 'ClickHouse',
+                            'description': 'Fast analytics database for real-time queries and dashboards',
+                            'available': True,
+                            'recommended': True
+                        },
+                        {
+                            'type': 'kafka',
+                            'name': 'Kafka Topic',
+                            'description': 'Stream to Kafka for custom downstream processing',
+                            'available': True,
+                            'recommended': False
+                        }
+                    ],
+                    'sessionId': session_id
+                }
+            }]
+        }
+
+    async def handle_topic_confirmation(
+        self,
+        data: Dict[str, Any],
+        user_id: str
+    ) -> Dict[str, Any]:
+        """
+        Process Kafka topic naming confirmation.
+
+        After topic is confirmed, proceed to destination schema or resources.
+        """
+        if data.get('cancelled'):
+            return {
+                'message': "Topic naming cancelled. Using default naming convention.",
+                'actions': []
+            }
+
+        session_id = data.get('sessionId', str(uuid.uuid4()))
+        session = self._get_session(session_id)
+
+        # Store topic configuration
+        topic_name = data.get('topic_name', data.get('topicName', ''))
+        session['topic_name'] = topic_name
+        session['steps_completed'].append('topic')
+
+        return {
+            'message': f"Kafka topic '{topic_name}' confirmed. Proceeding with destination configuration.",
+            'actions': []
+        }
+
+    async def handle_cost_confirmation(
+        self,
+        data: Dict[str, Any],
+        user_id: str
+    ) -> Dict[str, Any]:
+        """
+        Process cost estimation confirmation.
+
+        After cost is acknowledged, proceed to final confirmation.
+        """
+        if data.get('cancelled'):
+            return {
+                'message': "Cost estimate review cancelled. You can review costs anytime from the pipeline page.",
+                'actions': []
+            }
+
+        session_id = data.get('sessionId', str(uuid.uuid4()))
+        session = self._get_session(session_id)
+
+        # Store cost acknowledgement
+        session['cost_acknowledged'] = True
+        session['estimated_cost'] = data.get('estimated_cost', data.get('estimatedCost', {}))
+        session['steps_completed'].append('cost')
+
+        return {
+            'message': "Cost estimate acknowledged. Ready for final pipeline creation.",
+            'actions': []
+        }
+
+    async def handle_resources_confirmation(
+        self,
+        data: Dict[str, Any],
+        user_id: str
+    ) -> Dict[str, Any]:
+        """
+        Process resource creation plan confirmation.
+
+        After resources are confirmed, proceed to alert configuration or final creation.
+        """
+        if data.get('cancelled'):
+            return {
+                'message': "Resource creation cancelled. Let me know when you're ready to proceed.",
+                'actions': []
+            }
+
+        session_id = data.get('sessionId', str(uuid.uuid4()))
+        session = self._get_session(session_id)
+
+        # Store resource plan
+        session['resources_confirmed'] = True
+        session['resources_to_create'] = data.get('resources', [])
+        session['steps_completed'].append('resources')
+
+        return {
+            'message': "Resource plan confirmed. Proceeding with pipeline creation.",
+            'actions': []
         }
 
     async def handle_destination_confirmation(
@@ -806,6 +1028,18 @@ class ConfirmationHandlers:
         session_id = data.get('sessionId', str(uuid.uuid4()))
         session = self._get_session(session_id)
 
+        # Get credential_id from session or data (context persistence)
+        credential_id = session.get('credential_id') or data.get('credentialId') or data.get('credential_id')
+
+        print(f"[TOPIC_REGISTRY] Session data: {session}")
+        print(f"[TOPIC_REGISTRY] credential_id from session: {credential_id}")
+
+        if not credential_id:
+            return {
+                'message': "Error: Source credential not found. Please start over and select a data source first.",
+                'actions': []
+            }
+
         try:
             # Create pipeline record
             db_session = db_service._get_session()
@@ -823,8 +1057,8 @@ class ConfirmationHandlers:
                     id=str(uuid.uuid4()),
                     user_id=user_id,
                     name=pipeline_name,
-                    source_credential_id=session.get('credential_id'),
-                    source_tables=selected_tables,
+                    source_credential_id=credential_id,  # Use the credential_id we validated above
+                    source_tables=selected_tables if selected_tables else ['public.events'],
                     sink_type='clickhouse',
                     sink_config={
                         'clickhouse': clickhouse_config,

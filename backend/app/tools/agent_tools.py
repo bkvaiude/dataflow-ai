@@ -2550,9 +2550,656 @@ def troubleshoot_pipeline(
         }, indent=2)
 
 
+# ============================================================================
+# Phase 1: Intelligent Requirement Analysis Tools
+# These tools help the AI understand user intent and match to resources
+# ============================================================================
+
+@tool
+def analyze_user_requirements(message: str) -> str:
+    """
+    Analyze a user message to extract structured pipeline requirements.
+
+    Use this tool FIRST when a user asks to create a pipeline.
+    It extracts:
+    - Source hint (database name)
+    - Table hint (table names)
+    - Filter requirement (e.g., "only login events")
+    - Destination hint (e.g., "clickhouse")
+    - Alert requirement (e.g., "alert on gaps")
+    - Aggregation requirement (e.g., "count per hour")
+
+    Args:
+        message: The user's natural language message
+
+    Returns:
+        JSON with extracted requirements
+    """
+    from app.services.conversation_context import RequirementExtractor
+
+    extractor = RequirementExtractor()
+    requirements = extractor.extract(message)
+
+    response = {
+        "status": "success",
+        "message": "Requirements extracted from user message",
+        "requirements": requirements.to_dict(),
+        "has_filter": requirements.filter_requirement is not None,
+        "has_alert": requirements.alert_requirement is not None,
+        "has_destination": requirements.destination_hint is not None,
+        "next_step": "Use match_source_by_name with the source_hint to find matching credentials"
+    }
+
+    return json.dumps(response, indent=2)
+
+
+@tool
+def match_source_by_name(source_hint: str) -> str:
+    """
+    Find existing database credentials matching a source name hint.
+
+    Use this tool after analyze_user_requirements to find the user's database.
+    It uses fuzzy matching to find credentials matching the database name,
+    credential name, or host.
+
+    Args:
+        source_hint: Database name or connection name hint from user message
+            (e.g., "dataflow_test_audit_db", "production database", "audit db")
+
+    Returns:
+        JSON with matching credentials and match scores
+    """
+    from app.services.credential_service import credential_service
+    from app.services.conversation_context import SourceMatcher
+
+    user_id = get_user_context()
+
+    try:
+        # Get all user credentials
+        credentials = credential_service.list_credentials(user_id)
+
+        if not credentials:
+            return json.dumps({
+                "status": "not_found",
+                "message": "No database credentials found. User needs to add a source first.",
+                "credentials": [],
+                "next_step": "Use start_cdc_pipeline_setup to help user add credentials"
+            }, indent=2)
+
+        # Use fuzzy matching
+        matcher = SourceMatcher(credentials)
+        best_match = matcher.find_matching_source(source_hint, threshold=60)
+        all_matches = matcher.find_all_matching_sources(source_hint, threshold=40)
+
+        if best_match:
+            response = {
+                "status": "found",
+                "message": f"Found matching credential: {best_match['name']}",
+                "best_match": {
+                    "credential_id": best_match['id'],
+                    "name": best_match['name'],
+                    "database": best_match['database'],
+                    "host": best_match['host'],
+                    "source_type": best_match['source_type'],
+                    "match_score": best_match.get('match_score', 100)
+                },
+                "other_matches": [
+                    {
+                        "credential_id": m['id'],
+                        "name": m['name'],
+                        "database": m['database'],
+                        "match_score": m.get('match_score', 0)
+                    }
+                    for m in all_matches[1:4]  # Top 3 alternatives
+                ],
+                "next_step": "Use confirm_source_select action or discover_schema with the credential_id"
+            }
+        else:
+            response = {
+                "status": "no_match",
+                "message": f"No credentials matching '{source_hint}' found",
+                "available_credentials": [
+                    {"id": c['id'], "name": c['name'], "database": c['database']}
+                    for c in credentials[:5]
+                ],
+                "next_step": "Ask user to select from available credentials or add a new one"
+            }
+
+        return json.dumps(response, indent=2)
+
+    except Exception as e:
+        return json.dumps({
+            "status": "error",
+            "message": f"Failed to match source: {str(e)}"
+        }, indent=2)
+
+
+@tool
+def suggest_tables(
+    credential_id: str,
+    table_hint: str = "",
+    filter_requirement: str = ""
+) -> str:
+    """
+    Suggest tables from a database based on user's hint and filter requirements.
+
+    Use this tool after selecting a source to find relevant tables.
+    It uses fuzzy matching to suggest tables matching the user's description.
+
+    Args:
+        credential_id: ID of the source credential
+        table_hint: User's description of what table they want (e.g., "audit logs", "user events")
+        filter_requirement: User's filter requirement to help identify relevant columns
+
+    Returns:
+        JSON with suggested tables, match scores, and relevant columns
+    """
+    from app.services.schema_discovery_service import schema_discovery_service
+    from app.services.conversation_context import TableMatcher
+
+    user_id = get_user_context()
+
+    try:
+        # Discover schema
+        result = schema_discovery_service.discover(
+            user_id=user_id,
+            credential_id=credential_id,
+            schema_filter="public",
+            include_row_counts=True
+        )
+
+        tables = result.get('tables', [])
+
+        if not tables:
+            return json.dumps({
+                "status": "no_tables",
+                "message": "No tables found in the database",
+                "next_step": "Check if the database has tables in the public schema"
+            }, indent=2)
+
+        # Use fuzzy matching if hint provided
+        if table_hint:
+            matcher = TableMatcher(tables)
+            matched_tables = matcher.find_all_matching_tables(table_hint, threshold=40)
+        else:
+            # Return all tables without scoring
+            matched_tables = [
+                {**t, "match_score": 0, "suggested": False}
+                for t in tables
+            ]
+
+        # Enhance with column analysis for filter requirement
+        for table in matched_tables:
+            if filter_requirement:
+                # Find columns that might match the filter requirement
+                relevant_columns = []
+                filter_lower = filter_requirement.lower()
+
+                for col in table.get('columns', []):
+                    col_name = col.get('name', '').lower()
+                    col_type = col.get('data_type', '').lower()
+
+                    # Check if column name relates to filter
+                    if any(word in col_name for word in ['type', 'event', 'action', 'status', 'category']):
+                        relevant_columns.append({
+                            "name": col['name'],
+                            "type": col.get('data_type'),
+                            "reason": "Likely filter column based on name"
+                        })
+                    # Check for enum-like columns (text, varchar)
+                    elif 'varchar' in col_type or col_type == 'text':
+                        if any(hint in col_name for hint in filter_lower.split()):
+                            relevant_columns.append({
+                                "name": col['name'],
+                                "type": col.get('data_type'),
+                                "reason": "Matches filter keywords"
+                            })
+
+                table["suggested_filter_columns"] = relevant_columns
+
+        # Sort by match score
+        matched_tables.sort(key=lambda x: x.get('match_score', 0), reverse=True)
+
+        # Get top suggestions
+        suggested = [t for t in matched_tables if t.get('suggested', False)]
+
+        response = {
+            "status": "success",
+            "message": f"Found {len(tables)} tables, {len(suggested)} match your requirement",
+            "suggested_tables": [
+                {
+                    "schema_name": t['schema_name'],
+                    "table_name": t['table_name'],
+                    "full_name": f"{t['schema_name']}.{t['table_name']}",
+                    "row_count": t.get('estimated_row_count', 0),
+                    "match_score": t.get('match_score', 0),
+                    "cdc_eligible": t.get('cdc_eligible', False),
+                    "primary_key": t.get('primary_key', []),
+                    "suggested_filter_columns": t.get("suggested_filter_columns", [])
+                }
+                for t in suggested
+            ],
+            "all_tables": [
+                {
+                    "schema_name": t['schema_name'],
+                    "table_name": t['table_name'],
+                    "full_name": f"{t['schema_name']}.{t['table_name']}",
+                    "row_count": t.get('estimated_row_count', 0),
+                    "cdc_eligible": t.get('cdc_eligible', False)
+                }
+                for t in matched_tables[:10]  # Top 10
+            ],
+            "next_step": "Use confirm_tables action with the selected tables, then generate_filter for the filter"
+        }
+
+        return json.dumps(response, indent=2)
+
+    except Exception as e:
+        return json.dumps({
+            "status": "error",
+            "message": f"Failed to suggest tables: {str(e)}"
+        }, indent=2)
+
+
+@tool
+def generate_filter(
+    filter_requirement: str,
+    table_schema: str,
+    credential_id: str = "",
+    table_name: str = ""
+) -> str:
+    """
+    Generate SQL WHERE clause from natural language filter requirement.
+
+    Use this tool when the user specifies a filter like "only login and logout events".
+    It analyzes the table schema to find the appropriate column and generates valid SQL.
+
+    Args:
+        filter_requirement: Natural language filter (e.g., "only login and logout events")
+        table_schema: JSON string of table columns with types
+            (e.g., '[{"name": "event_type", "type": "varchar"}]')
+        credential_id: Optional - credential ID to fetch sample values
+        table_name: Optional - table name to preview filter impact
+
+    Returns:
+        JSON with generated WHERE clause, preview data, and estimated row counts
+    """
+    from app.services.sample_data_service import sample_data_service
+
+    user_id = get_user_context()
+
+    try:
+        # Parse table schema
+        if isinstance(table_schema, str):
+            columns = json.loads(table_schema)
+        else:
+            columns = table_schema
+
+        # Analyze filter requirement
+        filter_lower = filter_requirement.lower()
+
+        # Extract values from the filter (e.g., "login and logout" -> ['login', 'logout'])
+        # Common patterns
+        values = []
+        column_name = None
+
+        # Pattern: "only X and Y events"
+        if " and " in filter_lower:
+            parts = filter_lower.replace("only ", "").replace("events", "").replace("just ", "")
+            values = [v.strip() for v in parts.split(" and ") if v.strip()]
+
+        # Pattern: "only X events"
+        elif "only " in filter_lower or "just " in filter_lower:
+            value = filter_lower.replace("only ", "").replace("just ", "").replace("events", "").strip()
+            values = [value] if value else []
+
+        # Find the most likely column to filter on
+        likely_columns = []
+        for col in columns:
+            col_name = col.get('name', '').lower()
+            col_type = col.get('type', col.get('data_type', '')).lower()
+
+            # Score columns by relevance
+            score = 0
+
+            # Type-related columns
+            if 'type' in col_name:
+                score += 10
+            if 'event' in col_name:
+                score += 10
+            if 'action' in col_name:
+                score += 8
+            if 'status' in col_name:
+                score += 5
+            if 'category' in col_name:
+                score += 5
+
+            # Prefer string types for categorical filters
+            if 'varchar' in col_type or 'text' in col_type or 'char' in col_type:
+                score += 3
+
+            if score > 0:
+                likely_columns.append({
+                    "name": col['name'],
+                    "type": col.get('type', col.get('data_type')),
+                    "score": score
+                })
+
+        # Sort by score
+        likely_columns.sort(key=lambda x: x['score'], reverse=True)
+
+        if likely_columns:
+            column_name = likely_columns[0]['name']
+        else:
+            # Default to first string column
+            for col in columns:
+                col_type = col.get('type', col.get('data_type', '')).lower()
+                if 'varchar' in col_type or 'text' in col_type:
+                    column_name = col['name']
+                    break
+
+        if not column_name:
+            return json.dumps({
+                "status": "error",
+                "message": "Could not identify a suitable column for filtering",
+                "columns": [c['name'] for c in columns],
+                "suggestion": "Specify which column should be used for filtering"
+            }, indent=2)
+
+        # Generate WHERE clause
+        if len(values) > 1:
+            values_quoted = ", ".join([f"'{v}'" for v in values])
+            where_clause = f"{column_name} IN ({values_quoted})"
+        elif len(values) == 1:
+            where_clause = f"{column_name} = '{values[0]}'"
+        else:
+            # Couldn't extract values, generate a template
+            where_clause = f"{column_name} IN ('value1', 'value2')"
+
+        # Try to get sample data and estimate impact
+        preview_data = []
+        total_rows = 0
+        filtered_rows = 0
+
+        if credential_id and table_name:
+            try:
+                # Get sample data
+                sample = sample_data_service.fetch_sample(
+                    user_id=user_id,
+                    credential_id=credential_id,
+                    table_name=table_name.split('.')[-1],
+                    schema_name=table_name.split('.')[0] if '.' in table_name else 'public',
+                    limit=100
+                )
+
+                total_rows = sample.get('total_rows_estimate', 0)
+
+                # Filter sample data
+                if column_name in [c.get('name') for c in sample.get('columns', [])]:
+                    col_idx = next(i for i, c in enumerate(sample['columns']) if c['name'] == column_name)
+                    for row in sample.get('rows', []):
+                        row_value = str(row[col_idx]).lower() if len(row) > col_idx else ''
+                        if any(v.lower() in row_value for v in values):
+                            preview_data.append(row)
+
+                    # Estimate filtered rows based on sample ratio
+                    sample_ratio = len(preview_data) / len(sample.get('rows', [1])) if sample.get('rows') else 0
+                    filtered_rows = int(total_rows * sample_ratio)
+
+            except Exception as e:
+                print(f"[FILTER_GEN] Sample fetch failed: {e}")
+
+        response = {
+            "status": "success",
+            "message": f"Generated filter for '{filter_requirement}'",
+            "filter": {
+                "column": column_name,
+                "operator": "IN" if len(values) > 1 else "=",
+                "values": values,
+                "sql_where": where_clause
+            },
+            "impact": {
+                "total_rows": total_rows,
+                "filtered_rows": filtered_rows,
+                "filter_ratio": round(filtered_rows / total_rows * 100, 1) if total_rows > 0 else 0,
+                "reduction_percent": round((1 - filtered_rows / total_rows) * 100, 1) if total_rows > 0 else 0
+            },
+            "alternative_columns": [c['name'] for c in likely_columns[1:4]] if len(likely_columns) > 1 else [],
+            "preview_rows": preview_data[:5] if preview_data else [],
+            "next_step": "Use confirm_filter action to let user confirm the filter"
+        }
+
+        return json.dumps(response, indent=2)
+
+    except json.JSONDecodeError as e:
+        return json.dumps({
+            "status": "error",
+            "message": f"Invalid table_schema JSON: {str(e)}"
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({
+            "status": "error",
+            "message": f"Failed to generate filter: {str(e)}"
+        }, indent=2)
+
+
+@tool
+def estimate_pipeline_cost(
+    tables: str,
+    row_count: int = 0,
+    events_per_day: int = 0,
+    avg_row_size_bytes: int = 500,
+    has_filter: bool = False,
+    filter_reduction_percent: float = 0,
+    sink_type: str = "clickhouse"
+) -> str:
+    """
+    Estimate the cost of running a CDC pipeline.
+
+    Use this tool to show users estimated costs before creating a pipeline.
+    It calculates costs based on Confluent Cloud pricing.
+
+    Args:
+        tables: Comma-separated list of tables (e.g., "public.users,public.orders")
+        row_count: Estimated total rows in the tables
+        events_per_day: Estimated CDC events per day (if known)
+        avg_row_size_bytes: Average row size in bytes (default: 500)
+        has_filter: Whether a filter is applied
+        filter_reduction_percent: Percentage of data filtered out (0-100)
+        sink_type: Destination type (clickhouse, kafka, s3)
+
+    Returns:
+        JSON with detailed cost breakdown and monthly estimate
+    """
+    try:
+        # Confluent Cloud approximate pricing (as of 2024)
+        PRICING = {
+            "connector_task_hour": 0.01,      # $/task/hour
+            "throughput_per_gb": 0.10,        # $/GB transferred
+            "storage_per_gb_month": 0.10,     # $/GB/month retained
+            "ksqldb_csu_hour": 0.10,          # $/CSU/hour (if using ksqlDB)
+            "clickhouse_storage_gb": 0.02,    # $/GB/month in ClickHouse
+        }
+
+        table_list = [t.strip() for t in tables.split(',')] if tables else []
+        num_tables = len(table_list)
+
+        # Calculate data volume
+        if events_per_day == 0 and row_count > 0:
+            # Estimate events: assume 10% of rows change daily for active tables
+            events_per_day = int(row_count * 0.1)
+
+        # Apply filter reduction
+        if has_filter and filter_reduction_percent > 0:
+            effective_events = int(events_per_day * (1 - filter_reduction_percent / 100))
+        else:
+            effective_events = events_per_day
+
+        # Calculate data transfer (GB/day)
+        data_transfer_gb_day = (effective_events * avg_row_size_bytes) / (1024 ** 3)
+
+        # Calculate costs
+        # Source connector: 1 task per table (minimum)
+        source_tasks = max(1, num_tables)
+        source_connector_cost_day = source_tasks * PRICING["connector_task_hour"] * 24
+
+        # Sink connector: 1 task for ClickHouse
+        sink_tasks = 1
+        sink_connector_cost_day = sink_tasks * PRICING["connector_task_hour"] * 24
+
+        # Throughput cost
+        throughput_cost_day = data_transfer_gb_day * PRICING["throughput_per_gb"]
+
+        # ksqlDB cost (if using filter)
+        ksqldb_cost_day = 0
+        if has_filter:
+            # Assume 0.5 CSU for simple filtering
+            ksqldb_cost_day = 0.5 * PRICING["ksqldb_csu_hour"] * 24
+
+        # Storage cost (30-day retention + destination)
+        kafka_storage_gb_month = data_transfer_gb_day * 30  # 30-day retention
+        kafka_storage_cost_month = kafka_storage_gb_month * PRICING["storage_per_gb_month"]
+
+        destination_storage_gb_month = data_transfer_gb_day * 30
+        if sink_type == "clickhouse":
+            destination_storage_cost_month = destination_storage_gb_month * PRICING["clickhouse_storage_gb"]
+        else:
+            destination_storage_cost_month = destination_storage_gb_month * PRICING["storage_per_gb_month"]
+
+        # Total daily cost
+        total_daily = (
+            source_connector_cost_day +
+            sink_connector_cost_day +
+            throughput_cost_day +
+            ksqldb_cost_day +
+            (kafka_storage_cost_month + destination_storage_cost_month) / 30
+        )
+
+        total_monthly = total_daily * 30
+
+        response = {
+            "status": "success",
+            "message": f"Estimated costs for {num_tables} table(s)",
+            "cost_breakdown": {
+                "source_connector": {
+                    "tasks": source_tasks,
+                    "cost_per_day": round(source_connector_cost_day, 4),
+                    "cost_per_month": round(source_connector_cost_day * 30, 2)
+                },
+                "sink_connector": {
+                    "tasks": sink_tasks,
+                    "cost_per_day": round(sink_connector_cost_day, 4),
+                    "cost_per_month": round(sink_connector_cost_day * 30, 2)
+                },
+                "throughput": {
+                    "gb_per_day": round(data_transfer_gb_day, 4),
+                    "cost_per_day": round(throughput_cost_day, 4),
+                    "cost_per_month": round(throughput_cost_day * 30, 2)
+                },
+                "ksqldb_processing": {
+                    "enabled": has_filter,
+                    "cost_per_day": round(ksqldb_cost_day, 4),
+                    "cost_per_month": round(ksqldb_cost_day * 30, 2)
+                },
+                "storage": {
+                    "kafka_retention_days": 30,
+                    "kafka_cost_per_month": round(kafka_storage_cost_month, 2),
+                    "destination_cost_per_month": round(destination_storage_cost_month, 2)
+                }
+            },
+            "totals": {
+                "daily": round(total_daily, 2),
+                "monthly": round(total_monthly, 2),
+                "yearly": round(total_monthly * 12, 2)
+            },
+            "data_volume": {
+                "events_per_day": events_per_day,
+                "effective_events_per_day": effective_events,
+                "filter_reduction_percent": filter_reduction_percent if has_filter else 0,
+                "gb_per_day": round(data_transfer_gb_day, 4)
+            },
+            "notes": [
+                "Costs are estimates based on Confluent Cloud pricing",
+                "Actual costs may vary based on usage patterns",
+                "Storage costs assume 30-day retention",
+                "Filter reduces data transfer and storage costs"
+            ] + ([f"Filter reduces costs by ~{filter_reduction_percent:.0f}%"] if has_filter else []),
+            "next_step": "Use confirm_cost action to show this to the user"
+        }
+
+        return json.dumps(response, indent=2)
+
+    except Exception as e:
+        return json.dumps({
+            "status": "error",
+            "message": f"Failed to estimate costs: {str(e)}"
+        }, indent=2)
+
+
+@tool
+def list_source_credentials() -> str:
+    """
+    List all configured database credentials for the current user.
+
+    Use this tool to show available data sources when the user
+    wants to create a pipeline.
+
+    Returns:
+        JSON with list of credentials (without sensitive data)
+    """
+    from app.services.credential_service import credential_service
+
+    user_id = get_user_context()
+
+    try:
+        credentials = credential_service.list_credentials(user_id)
+
+        if not credentials:
+            return json.dumps({
+                "status": "success",
+                "message": "No credentials configured yet",
+                "credentials": [],
+                "next_step": "Use start_cdc_pipeline_setup to add a new data source"
+            }, indent=2)
+
+        response = {
+            "status": "success",
+            "message": f"Found {len(credentials)} configured data source(s)",
+            "credentials": [
+                {
+                    "credential_id": c['id'],
+                    "name": c['name'],
+                    "source_type": c['source_type'],
+                    "host": c['host'],
+                    "database": c['database'],
+                    "is_valid": c.get('is_valid', True),
+                    "created_at": c.get('created_at')
+                }
+                for c in credentials
+            ],
+            "next_step": "Select a credential to use with discover_schema or create_cdc_pipeline"
+        }
+
+        return json.dumps(response, indent=2)
+
+    except Exception as e:
+        return json.dumps({
+            "status": "error",
+            "message": f"Failed to list credentials: {str(e)}"
+        }, indent=2)
+
+
 def get_all_tools() -> list:
     """Get all LangChain tools for the agent."""
     return [
+        # NEW: Intelligent requirement analysis tools (Phase 1)
+        analyze_user_requirements,
+        match_source_by_name,
+        suggest_tables,
+        generate_filter,
+        estimate_pipeline_cost,
+        list_source_credentials,
+
         # Interactive workflow tools (PREFER THESE for user-facing tasks)
         start_cdc_pipeline_setup,  # Use for CDC pipeline setup - step-by-step
         start_alert_setup,         # Use for alert configuration - step-by-step

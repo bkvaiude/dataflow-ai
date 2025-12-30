@@ -433,6 +433,42 @@ async def start_pipeline(
         if pipeline.status == "running":
             raise HTTPException(status_code=400, detail="Pipeline is already running")
 
+        # Pre-create Kafka topics before creating connectors
+        # Confluent Cloud doesn't auto-create topics
+        from app.services.topic_service import topic_service
+
+        server_name = f"dataflow_{pipeline_id[:8]}"
+        topics_to_create = []
+
+        for source_table in pipeline.source_tables:
+            parts = source_table.split('.')
+            schema_name = parts[0] if len(parts) > 1 else 'public'
+            table_name = parts[-1]
+            topic_name = f"{server_name}.{schema_name}.{table_name}"
+            topics_to_create.append(topic_name)
+
+        # Also create schema history topic for Debezium
+        schema_history_topic = f"{server_name}.schema-history"
+        topics_to_create.append(schema_history_topic)
+
+        # Create all required topics
+        for topic in topics_to_create:
+            try:
+                topic_service.create_topic(
+                    topic_name=topic,
+                    partitions=3,
+                    replication_factor=3,
+                    retention_ms=604800000  # 7 days
+                )
+                pipeline_monitor.log_event(pipeline_id, "topic_created", f"Created topic: {topic}")
+            except Exception as e:
+                if "already exists" not in str(e).lower():
+                    pipeline.status = "failed"
+                    pipeline.error_message = f"Failed to create topic {topic}: {str(e)}"
+                    session.commit()
+                    pipeline_monitor.log_event(pipeline_id, "error", f"Topic creation failed: {str(e)}")
+                    raise HTTPException(status_code=500, detail=f"Failed to create topic: {str(e)}")
+
         # Create source connector
         try:
             connector_result = confluent_connector_service.create_source_connector(
@@ -497,15 +533,33 @@ async def start_pipeline(
                 # Create table for each source table (if createNew was selected)
                 ch_config = pipeline.sink_config.get('clickhouse', {})
                 if ch_config.get('createNew', True):
-                    schemas = pipeline.sink_config.get('schemas', [])
-                    for schema_info in schemas:
-                        columns = schema_info.get('schema', {}).get('columns', [])
-                        if columns:
-                            clickhouse_service.create_table(
-                                table_name=schema_info.get('clickhouse_table', ch_config.get('table')),
-                                columns=columns,
-                                engine="ReplacingMergeTree"
-                            )
+                    # Get approved schema - note: stored as 'schema' (singular) not 'schemas'
+                    approved_schema = pipeline.sink_config.get('schema', {})
+                    columns = approved_schema.get('columns', [])
+
+                    if columns:
+                        # IMPORTANT: ClickHouse sink connector uses topic name as table name by default
+                        # So we must create tables with topic names (with dots escaped via backticks)
+                        for topic_name in topics:
+                            try:
+                                clickhouse_service.create_table(
+                                    table_name=topic_name,  # Use topic name directly
+                                    columns=columns,
+                                    engine="ReplacingMergeTree"
+                                )
+                                pipeline_monitor.log_event(
+                                    pipeline_id,
+                                    "table_created",
+                                    f"Created ClickHouse table: {topic_name}"
+                                )
+                            except Exception as table_err:
+                                if "already exists" not in str(table_err).lower():
+                                    raise table_err
+                                pipeline_monitor.log_event(
+                                    pipeline_id,
+                                    "table_exists",
+                                    f"ClickHouse table already exists: {topic_name}"
+                                )
 
                 # Create sink connector
                 sink_result = confluent_connector_service.create_sink_connector(

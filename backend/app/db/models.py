@@ -258,6 +258,18 @@ class Pipeline(Base):
     source_tables = Column(JSON, nullable=False)  # ["public.users", "public.orders"]
     source_connector_name = Column(String(255), nullable=True)
 
+    # Filtering configuration (Phase 1: Intelligent Requirement Extraction)
+    source_filters = Column(JSON, nullable=True)  # Filter configs applied to source data
+    # Example: [{"table": "public.audit_logs", "column": "event_type", "operator": "IN", "values": ["login", "logout"], "sql_where": "event_type IN ('login', 'logout')"}]
+
+    # User requirements (extracted from natural language)
+    user_requirements = Column(JSON, nullable=True)  # Original requirements from NL message
+    # Example: {"source_hint": "audit_db", "table_hint": "audit logs", "filter_requirement": "only login and logout events", "destination_hint": "clickhouse", "alert_requirement": "gap detection"}
+
+    # Cost estimate (calculated before pipeline creation)
+    estimated_cost = Column(JSON, nullable=True)  # Cost breakdown
+    # Example: {"daily": 0.80, "monthly": 24.00, "breakdown": {"connector": 0.48, "throughput": 0.12, "storage": 0.20}}
+
     # Sink configuration
     sink_type = Column(String(50), nullable=False)  # 'clickhouse', 'kafka', 's3'
     sink_config = Column(JSON, nullable=False)  # Connection details and settings
@@ -298,6 +310,9 @@ class Pipeline(Base):
             "source_credential_id": self.source_credential_id,
             "source_tables": self.source_tables,
             "source_connector_name": self.source_connector_name,
+            "source_filters": self.source_filters,
+            "user_requirements": self.user_requirements,
+            "estimated_cost": self.estimated_cost,
             "sink_type": self.sink_type,
             "sink_config": self.sink_config,
             "sink_connector_name": self.sink_connector_name,

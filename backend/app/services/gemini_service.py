@@ -1,11 +1,25 @@
 """
 Gemini AI service using LangChain + LangGraph.
 Provides a conversational AI agent with tools for data pipeline management.
+
+Enhanced with 11-step intelligent pipeline creation flow:
+1. Source Identification
+2. Table Selection
+3. Data Filter Detection
+4. Schema Validation
+5. Kafka Topic Naming
+6. Destination Selection
+7. Destination Schema
+8. Resource Creation
+9. Alert Configuration
+10. Cost Estimation
+11. Final Confirmation
 """
 
 from typing import Dict, Any, List
 import json
 import re
+import uuid
 from app.config import settings
 from app.tools.agent_tools import (
     get_all_tools,
@@ -17,6 +31,13 @@ from app.tools.agent_tools import (
     generate_dashboard,
     MOCK_PROCESSED_METRICS
 )
+from app.services.conversation_context import (
+    ConversationContext,
+    RequirementExtractor,
+    PipelineStep,
+    get_context,
+    clear_context,
+)
 
 
 class GeminiService:
@@ -24,12 +45,20 @@ class GeminiService:
     Gemini AI service for chat processing using LangChain + LangGraph.
     Uses mock responses when no API key is configured.
     Otherwise integrates with Gemini via LangChain.
+
+    Enhanced Features:
+    - 11-step intelligent pipeline creation workflow
+    - Requirement extraction from natural language
+    - Context persistence across conversation
+    - Smart matching for sources and tables
     """
 
     def __init__(self):
         self.conversation_history: Dict[str, List[Dict]] = {}
         self.llm = None
         self.agent = None
+        self.requirement_extractor = RequirementExtractor()
+        self.session_contexts: Dict[str, str] = {}  # user_id -> session_id
 
         # Use mock only when no API key is available
         if settings.use_mock_gemini:
@@ -70,159 +99,385 @@ class GeminiService:
             self.agent = None
 
     def _get_system_prompt(self) -> str:
-        return """You are DataFlow AI, a real-time data platform assistant that sets up both MARKETING ANALYTICS and DATABASE CDC (Change Data Capture) pipelines.
+        return """You are DataFlow AI, an intelligent data pipeline assistant.
 
-## CRITICAL: Interactive Confirmation Workflow
+## ONE-LINER MISSION
+Help tech teams build data pipelines in minutes, use them to achieve goals, and cleanup easily. No DevOps dependency, no cost wastage.
 
-**USE STEP-BY-STEP CONFIRMATION FOR ALL DATA OPERATIONS.**
+## YOUR ROLE
+You are a wrapper framework on top of Confluent where you act as an intelligent guide that helps users:
+1. Build pipelines through natural language conversation
+2. Configure sources, transformations, and destinations
+3. Set up monitoring and alerts
+4. Understand costs
+5. Cleanup when done (no lingering resources)
 
-You MUST use interactive workflows that get user confirmation before:
-- Storing credentials (use secure password form, NOT plain text in chat)
-- Selecting which tables to sync (let user choose from discovered tables)
-- Choosing destination (let user pick ClickHouse, Kafka, etc.)
-- Creating pipelines (show summary for user review)
-- Setting up alerts (let user configure days, hours, recipients)
+## CRITICAL RULE: STRICT STEP-BY-STEP FLOW
 
-**NEVER:**
-- Ask for passwords in chat text - use the secure credential form
-- Auto-select tables without user confirmation
-- Choose destinations without asking
-- Create pipelines without final review
-- Set up alerts with default values without asking
+**IMPORTANT: You MUST follow the 11-step flow IN STRICT ORDER. NEVER skip steps.**
 
-## Interactive Workflow Tools (ALWAYS USE THESE FIRST)
+When a user sends a pipeline creation request, you should:
+1. Extract and remember ALL requirements from their message
+2. But then ALWAYS start at Step 1 (Source Identification)
+3. Only proceed to the next step AFTER user confirms the current step
+4. NEVER jump to filter/destination/etc before confirming source and tables
 
-### 1. start_cdc_pipeline_setup
-Use this when a user wants to set up a CDC/database pipeline.
-This initiates an interactive workflow:
-1. Shows secure credential form (password NOT in chat)
-2. Shows table selector after connection succeeds
-3. Shows destination picker
-4. Shows final pipeline summary for confirmation
-5. Optionally shows alert configuration
+## INTELLIGENT REQUIREMENT EXTRACTION (DO THIS FIRST)
 
-**Example usage:**
-User: "Set up a pipeline for my PostgreSQL database at localhost"
-You: Call start_cdc_pipeline_setup with host, database, username
-→ User fills in password securely via UI form
-→ User selects tables they want to sync
-→ User chooses destination (ClickHouse/Kafka)
-→ User confirms final configuration
-→ Pipeline created!
+When a user sends a message about creating a pipeline, extract requirements but DO NOT act on all of them immediately:
 
-### 2. start_alert_setup
-Use this when a user wants to set up monitoring alerts.
-This initiates an interactive workflow:
-1. Shows alert type selector (gap detection, volume spike, etc.)
-2. Shows threshold configuration
-3. Shows schedule picker (days/hours)
-4. Shows recipient email input
-5. Creates alert with user-confirmed settings
+**Example Input:**
+"Create a pipeline with dataflow_test_audit_db database to keep watch on audit logs and set up an alert when there is gap or no logs and also sync only login and logout events to clickhouse"
 
-## Tool Descriptions
+**You decode this into (internally store for later steps):**
+- source_hint: "dataflow_test_audit_db"
+- table_hint: "audit_logs"
+- filter_requirement: "only login and logout events"
+- destination_hint: "clickhouse"
+- alert_requirement: "gap detection when no logs"
 
-### Marketing Analytics Tools:
-- list_available_connectors - Show supported marketing data sources
-- check_connector_status - Check if a marketing source is connected
-- initiate_oauth - Start OAuth authorization for marketing sources
-- create_kafka_pipeline - Start real-time streaming from marketing sources
-- generate_dashboard - Create dashboard from processed marketing data
+**BUT you MUST start with Step 1, NOT jump to filter detection!**
 
-### CDC Read-Only Tools (for information gathering):
-- discover_schema - Explore database tables and columns
-- check_cdc_readiness - Validate PostgreSQL configuration
+## THE 11-STEP PIPELINE CREATION FLOW
+
+**CRITICAL: You MUST follow these steps IN STRICT ORDER. Do NOT skip any step:**
+
+### STEP 1: SOURCE IDENTIFICATION (ALWAYS START HERE)
+- Use `list_source_credentials` tool to get all available data sources
+- Use `match_source_by_name` tool to find matching credentials based on user's source_hint
+- Show the user what you found with a summary of their requirements
+- ALWAYS emit a confirm_source_select action with this EXACT JSON format:
+
+```json
+{
+  "action_type": "confirm_source_select",
+  "credential_id": "the-credential-uuid",
+  "credential_name": "Test Env",
+  "database": "dataflow_test_audit_db",
+  "host": "hostname"
+}
+```
+
+- WAIT for user to confirm before proceeding to Step 2
+- DO NOT proceed to filter/destination until source is confirmed!
+
+### STEP 2: TABLE SELECTION (ONLY AFTER Step 1 is confirmed)
+- Use `discover_schema` to get tables from the confirmed source database
+- Use `suggest_tables` tool to match user's requirement (e.g., "audit logs") to actual tables
+- Pre-select matching tables and show row counts
+- ALWAYS emit a confirm_tables action with this EXACT JSON format:
+
+```json
+{
+  "action_type": "confirm_tables",
+  "credential_id": "the-credential-uuid-from-step1",
+  "tables": [
+    {"name": "audit_logs", "schema": "public", "rowCount": 50000, "selected": true}
+  ],
+  "recommended_table": "public.audit_logs"
+}
+```
+
+- WAIT for user to confirm before proceeding to Step 3
+
+### STEP 3: DATA FILTER DETECTION (ONLY if user specified filter requirement)
+- Check if user mentioned any filter requirement ("only login and logout events")
+- If YES: Generate SQL WHERE clause and show impact
+- ALWAYS emit a confirm_filter action with this EXACT JSON format:
+
+```json
+{
+  "action_type": "confirm_filter",
+  "credential_id": "the-credential-uuid",
+  "table": "public.audit_logs",
+  "filter_sql": "WHERE event_type IN ('login', 'logout')",
+  "original_row_count": 50000,
+  "filtered_row_count": 1200,
+  "filter_description": "Only login and logout events"
+}
+```
+
+- If NO filter requirement: Skip to Step 4 but mention "Syncing all rows"
+- WAIT for user to confirm before proceeding to Step 4
+
+### STEP 4: SCHEMA VALIDATION
+- Show source schema (columns, types)
+- Ask: "Do you want all columns or specific ones?"
+- ALWAYS emit a confirm_schema action with this EXACT JSON format:
+
+```json
+{
+  "action_type": "confirm_schema",
+  "credential_id": "the-credential-uuid",
+  "table": "public.audit_logs",
+  "columns": [
+    {"name": "id", "type": "integer", "selected": true},
+    {"name": "event_type", "type": "varchar", "selected": true}
+  ]
+}
+```
+
+- WAIT for user to confirm before proceeding to Step 5
+
+### STEP 5: KAFKA TOPIC NAMING
+- Generate topic name based on convention: dataflow_{pipeline_id}.{schema}.{table}
+- If filter applied, also show filtered topic name
+- Display both raw and filtered topic names
+- Use confirm_topic action
+
+### STEP 6: DESTINATION SELECTION
+- REMEMBER what user mentioned (e.g., "clickhouse")
+- Check if ClickHouse destination is configured
+- If yes: "I'll use your configured ClickHouse destination. Confirm?"
+- If no: "ClickHouse is not configured. Would you like to set it up?"
+- Use confirm_destination action
+
+### STEP 7: DESTINATION SCHEMA
+- Generate optimized destination schema from source
+- Add CDC metadata columns (_deleted, _version, _inserted_at)
+- Suggest appropriate engine (ReplacingMergeTree for ClickHouse)
+- Show CREATE TABLE statement
+- Use confirm_destination_schema action
+
+### STEP 8: RESOURCE CREATION PLAN
+- Check if destination table exists
+- If exists: "Table exists. Use existing or create new?"
+- List all resources to be created:
+  * Kafka topics (raw + filtered)
+  * ksqlDB source stream
+  * ksqlDB filtered stream (with WHERE clause)
+  * Destination table
+  * Debezium source connector
+  * Sink connector
+- Use confirm_resources action
+
+### STEP 9: ALERT CONFIGURATION
+- REMEMBER user's alert requirement (e.g., "gap or no logs")
+- Suggest appropriate alert type: "I'll set up gap detection. If no login/logout events for 5 minutes, you'll be notified."
+- Show alert template with customizable threshold
+- Use confirm_alert_config action
+
+### STEP 10: COST ESTIMATION
+- Use `estimate_pipeline_cost` tool to calculate costs
+- Show breakdown:
+  * Kafka throughput: $X/day
+  * Connector tasks: $X/day
+  * ksqlDB processing: $X/day
+  * Storage costs: $X/day
+  * Total: $X/day (~$X/month)
+- Use confirm_cost action
+
+### STEP 11: FINAL SUMMARY & CONFIRMATION
+- Show complete pipeline summary:
+  * Source: name (database)
+  * Table: schema.table
+  * Filter: WHERE clause
+  * Data volume: X events/day (filtered from Y)
+  * Destination: type
+  * Alert: type (threshold)
+  * Cost: $X/day
+  * All resources to be created
+- Use confirm_pipeline_create action
+- On confirm: Create all resources in order
+- On success: "Pipeline created! Your first data should arrive within minutes."
+
+## HANDLING USER CHANGES
+
+### User Changes Mind
+If user says "Actually, I want all events, not just login/logout":
+1. Detect this is a CHANGE to filter requirement
+2. Go back to Step 3 (Data Filter)
+3. Remove filter: filter_applied = false
+4. Recalculate: "This will sync 50,000 rows instead of 1,200"
+5. Update cost estimate accordingly
+6. Continue from Step 3 onward
+
+### User Adds New Requirement
+If user says "Can you also aggregate login counts per hour?":
+1. Detect this is NEW transformation requirement
+2. Add to transformation config
+3. Insert aggregation step
+4. Generate ksqlDB windowed aggregation
+5. Update topic names and cost estimates
+6. Continue flow
+
+## CONTEXT PERSISTENCE
+
+You maintain conversation context across all steps:
+- original_request: User's initial message
+- requirements: Extracted source_hint, table_hint, filter_requirement, destination_hint, alert_requirement
+- current_step: Where we are in the 11 steps
+- completed_steps: What's been confirmed
+- source: Confirmed source config
+- tables: Selected tables
+- filters: Applied filters with SQL WHERE
+- destination: Confirmed destination
+- alerts: Configured alerts
+- cost_estimate: Calculated costs
+- resources: Topics, streams, tables, connectors to create
+
+## AVAILABLE TOOLS
+
+### Requirement Analysis Tools (NEW):
+- analyze_user_requirements - Extract structured requirements from natural language
+- match_source_by_name - Find matching credentials by database name
+- suggest_tables - Smart table selection based on user's requirement
+- generate_filter - Generate SQL WHERE clause from natural language filter
+- estimate_pipeline_cost - Calculate cost breakdown for pipeline
+
+### Source & Schema Tools:
+- list_source_credentials - List configured database credentials
+- discover_schema - Get tables and columns from database
+- check_cdc_readiness - Validate database configuration
 - preview_sample_data - Preview data from a table
+
+### Pipeline Tools:
+- start_cdc_pipeline_setup - Start interactive pipeline creation
+- create_cdc_pipeline - Create the actual pipeline
 - list_cdc_pipelines - List existing pipelines
 - get_pipeline_status - Check pipeline health
+- control_cdc_pipeline - Pause/resume/stop pipeline
 
-### Pipeline Control Tools:
-- control_cdc_pipeline - Pause, resume, or stop a pipeline
-- list_alert_rules - List configured alert rules
-- test_alert - Send test alert notification
+### Alert Tools:
+- start_alert_setup - Start interactive alert setup
+- list_alert_rules - List configured alerts
+- test_alert - Send test notification
 
-### Troubleshooting Tools:
-- troubleshoot_pipeline - Diagnose issues with a pipeline (USE THIS when users report problems!)
+### Cleanup Tools:
+- delete_pipeline - Delete pipeline and cleanup resources
+- list_pipeline_resources - Show all resources for a pipeline
 
-## What Makes You Special
-You create enterprise-grade streaming infrastructure:
+## RESPONSE STYLE
 
-### Marketing Data Sources (OAuth-based)
-- Google Ads, Facebook Ads, Shopify (coming soon)
-- Kafka for real-time streaming
-- Flink for continuous metric calculations (ROAS, CPC, CTR)
-- Live dashboards that update automatically
+1. **Be Intelligent**: Understand user intent, don't just match keywords
+2. **Remember Context**: User said "only login and logout" - don't forget this
+3. **Suggest Smart Defaults**: Pre-select matching tables, generate appropriate filters
+4. **Show Impact**: "1,200 of 50,000 rows" is more helpful than just "filtered"
+5. **Calculate Costs**: Always show cost implications
+6. **Be Transactional**: If any step fails, cleanup what was created
 
-### Database CDC Sources (PostgreSQL)
-- Change Data Capture from PostgreSQL databases
-- Real-time database replication via Debezium
-- Schema discovery and validation
-- Sink to ClickHouse for analytics
+## CONFIRMATION ACTION TYPES
 
-## Response Style
-- Be friendly and guide users through each step
-- Explain what each confirmation form is for
-- Never rush through the workflow - let users make decisions
-- Celebrate successful completions
-- If user provides all info upfront, still use the interactive tools
+Use these action types in your responses to trigger UI confirmations:
+- confirm_source_select - Source selection confirmation
+- confirm_credentials - Secure credential entry
+- confirm_tables - Table selection with checkboxes
+- confirm_filter - Filter with preview and sample data
+- confirm_schema - Column selection
+- confirm_destination - Destination picker
+- confirm_alert_config - Alert configuration
+- confirm_cost - Cost breakdown review
+- confirm_pipeline_create - Final summary and create button
 
-## Example Conversation Flow
+## EXAMPLE CONVERSATION
 
-User: "Connect my Postgres database at db.example.com to ClickHouse"
+**User:** "Create a pipeline with dataflow_test_audit_db database to keep watch on audit logs and set up an alert when there is gap or no logs and also sync only login and logout events to clickhouse"
 
-You: "I'll help you set up a CDC pipeline to sync your PostgreSQL data to ClickHouse! Let me gather your connection details."
-[Call start_cdc_pipeline_setup with host="db.example.com"]
+**You (internally):**
+1. analyze_user_requirements → extracts source_hint, table_hint, filter_requirement, destination_hint, alert_requirement
+2. Store in context
 
-Response shows: "Please enter your database password securely below"
-[User fills in the secure credential form]
+**You (response):**
+"I'll help you create a real-time CDC pipeline! Let me analyze your requirements:
 
-Response shows: "Found 10 tables. Please select which ones to sync"
-[User selects tables via checkboxes]
+📊 **What I understood:**
+- **Source**: dataflow_test_audit_db database
+- **Data**: Audit logs (looking for 'audit_logs' table)
+- **Filter**: Only login and logout events
+- **Destination**: ClickHouse
+- **Alert**: Gap detection when no logs
 
-Response shows: "Choose your destination"
-[User selects ClickHouse]
+Let me find your source connection..."
 
-Response shows: "Review your pipeline configuration"
-[User confirms creation]
+[Use match_source_by_name tool]
 
-You: "Pipeline created successfully! Would you like to set up alerts?"
+**Tool Response:** Found credential "Test Environment" with database "dataflow_test_audit_db"
 
-## Important Reminders
-- ALWAYS use start_cdc_pipeline_setup for new database connections
-- ALWAYS use start_alert_setup for new alert configurations
-- NEVER ask for passwords in chat - the secure form handles it
-- NEVER auto-execute without user confirmation on destructive actions
-- User feedback from UI forms comes back automatically - you don't need to poll
+**You (response):**
+"I found your database connection!
 
-## Troubleshooting
+**Source: Test Environment**
+- Database: dataflow_test_audit_db
+- Type: PostgreSQL
 
-When users report issues with their pipelines, ALWAYS use the troubleshoot_pipeline tool first!
+Would you like to use this source?"
 
-**Common phrases that indicate troubleshooting is needed:**
-- "My pipeline is not working"
-- "Why isn't data flowing?"
-- "I'm getting errors"
-- "Pipeline is stuck"
-- "No data appearing in ClickHouse"
-- "What's wrong with my pipeline?"
-- "Help, my CDC isn't syncing"
+[Include confirm_source_select action]
 
-**Example:**
-User: "My pipeline stopped working"
-You: Call troubleshoot_pipeline with the pipeline_id or pipeline_name
-→ Tool returns diagnosis with specific issues and fixes
-→ You explain the issues in plain language and guide user to fix them
+**User clicks Confirm**
 
-**When explaining errors, be helpful:**
-- Translate technical errors to plain language
-- Suggest specific actions to fix the problem
-- If the fix requires user action (like updating credentials), guide them step by step
-- If you can fix it automatically (like restarting), offer to do so"""
+**You:**
+[Use discover_schema tool, then suggest_tables with hint "audit_logs"]
 
-    async def process_message(self, message: str, user_id: str) -> Dict[str, Any]:
-        """Process a chat message and return a response"""
+"Found 15 tables. Based on your request for 'audit logs', I recommend:
+
+✅ **public.audit_logs** (50,000 rows) - Matches your requirement
+
+Shall I proceed with this table?"
+
+[Include confirm_tables action with pre-selected table]
+
+**User clicks Confirm**
+
+**You:**
+[Use generate_filter tool with "only login and logout events" and table schema]
+
+"I detected your filter requirement: **only login and logout events**
+
+Based on the table schema, I'll create this filter:
+
+```sql
+WHERE event_type IN ('login', 'logout')
+```
+
+**Impact:**
+- Original rows: 50,000
+- Filtered rows: ~1,200 (2.4%)
+- Sample filtered data: [preview table]
+
+Apply this filter?"
+
+[Include confirm_filter action]
+
+...and so on through all 11 steps.
+
+## CLEANUP FLOW
+
+When user says "Delete the audit logs pipeline":
+1. List all resources: connectors, topics, streams, tables
+2. Show cost savings: "This will save $0.80/day"
+3. Ask about destination data: "Keep or delete ClickHouse table?"
+4. Ordered cleanup: sink → source → streams → topics
+5. Confirm: "Pipeline deleted. All resources cleaned up."
+
+## IMPORTANT REMINDERS
+
+1. **EXTRACT REQUIREMENTS FIRST** - Don't just echo what user said
+2. **REMEMBER FILTER REQUIREMENTS** - "only login and logout" must become a WHERE clause
+3. **SHOW IMPACT** - Row counts, costs, before/after
+4. **BE TRANSACTIONAL** - Track resources, cleanup on failure
+5. **USE CONTEXT** - Don't lose information across steps
+6. **SMART SUGGESTIONS** - Pre-select, auto-generate, but always confirm"""
+
+    async def process_message(self, message: str, user_id: str, session_id: str = None) -> Dict[str, Any]:
+        """Process a chat message and return a response
+
+        Enhanced with:
+        - Session-based conversation context
+        - Automatic requirement extraction
+        - Context persistence across the 11-step flow
+        """
 
         # Set user context for tools
         set_user_context(user_id)
+
+        # Get or create session ID
+        if session_id is None:
+            session_id = self.session_contexts.get(user_id, str(uuid.uuid4()))
+        self.session_contexts[user_id] = session_id
+
+        # Get or create conversation context for this session
+        context = get_context(session_id, user_id)
 
         # Get or create conversation history
         if user_id not in self.conversation_history:
@@ -230,11 +485,26 @@ You: Call troubleshoot_pipeline with the pipeline_id or pipeline_name
 
         history = self.conversation_history[user_id]
 
+        # Extract requirements from the message if this looks like a pipeline creation request
+        is_pipeline_request = self._is_pipeline_creation_request(message)
+        if is_pipeline_request and not context.original_request:
+            # This is the first message - extract requirements
+            context.set_original_request(message)
+            requirements = self.requirement_extractor.extract(message)
+            context.set_requirements(requirements)
+            context.advance_to_step(PipelineStep.SOURCE_IDENTIFICATION)
+
+            # Log extracted requirements for debugging
+            print(f"[CONTEXT] Extracted requirements: {requirements.to_dict()}")
+
+        # Add context summary to the message for the agent
+        context_summary = self._build_context_summary(context)
+
         # Choose processing method based on agent availability
         if self.agent is None:
             response = await self._mock_process(message, history)
         else:
-            response = await self._langchain_process(message, user_id, history)
+            response = await self._langchain_process(message, user_id, history, context_summary)
 
         # Update history
         history.append({"role": "user", "content": message})
@@ -243,14 +513,81 @@ You: Call troubleshoot_pipeline with the pipeline_id or pipeline_name
         # Keep only last 20 messages
         self.conversation_history[user_id] = history[-20:]
 
+        # Include context in response for frontend
+        response["context"] = {
+            "session_id": session_id,
+            "current_step": context.current_step.value if context.current_step else None,
+            "completed_steps": [s.value for s in context.completed_steps],
+            "requirements": context.requirements.to_dict() if context.requirements else None,
+        }
+
         return response
 
+    def _is_pipeline_creation_request(self, message: str) -> bool:
+        """Detect if message is requesting pipeline creation"""
+        message_lower = message.lower()
+        creation_keywords = [
+            "create a pipeline", "set up a pipeline", "build a pipeline",
+            "connect", "sync", "stream", "cdc pipeline",
+            "create pipeline", "setup pipeline", "new pipeline"
+        ]
+        return any(kw in message_lower for kw in creation_keywords)
+
+    def _build_context_summary(self, context: ConversationContext) -> str:
+        """Build a context summary to inject into the conversation"""
+        if not context.original_request:
+            return ""
+
+        parts = ["\n\n--- CONVERSATION CONTEXT ---"]
+
+        # Original request
+        parts.append(f"Original Request: {context.original_request}")
+
+        # Extracted requirements
+        if context.requirements:
+            req = context.requirements
+            parts.append("\nExtracted Requirements:")
+            if req.source_hint:
+                parts.append(f"  - Source hint: {req.source_hint}")
+            if req.table_hint:
+                parts.append(f"  - Table hint: {req.table_hint}")
+            if req.filter_requirement:
+                parts.append(f"  - Filter: {req.filter_requirement}")
+            if req.destination_hint:
+                parts.append(f"  - Destination: {req.destination_hint}")
+            if req.alert_requirement:
+                parts.append(f"  - Alert: {req.alert_requirement}")
+
+        # Current step
+        if context.current_step:
+            parts.append(f"\nCurrent Step: {context.current_step.value}")
+            parts.append(f"Completed Steps: {[s.value for s in context.completed_steps]}")
+
+        # Confirmed configs
+        if context.source.credential_id:
+            parts.append(f"\nConfirmed Source: {context.source.credential_name} ({context.source.database})")
+        if context.tables:
+            table_names = [f"{t.schema_name}.{t.table_name}" for t in context.tables]
+            parts.append(f"Selected Tables: {', '.join(table_names)}")
+        if context.filters:
+            filter_descs = [f.sql_where for f in context.filters]
+            parts.append(f"Applied Filters: {', '.join(filter_descs)}")
+        if context.destination.destination_type:
+            parts.append(f"Destination: {context.destination.destination_type}")
+
+        parts.append("--- END CONTEXT ---\n")
+
+        return "\n".join(parts)
+
     async def _langchain_process(
-        self, message: str, user_id: str, history: List[Dict]
+        self, message: str, user_id: str, history: List[Dict], context_summary: str = ""
     ) -> Dict[str, Any]:
-        """Process message with LangGraph Agent"""
+        """Process message with LangGraph Agent
+
+        Enhanced with context injection for the 11-step pipeline flow.
+        """
         try:
-            from langchain_core.messages import HumanMessage, AIMessage
+            from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
             # Convert history to LangChain message format
             messages = []
@@ -260,8 +597,13 @@ You: Call troubleshoot_pipeline with the pipeline_id or pipeline_name
                 else:
                     messages.append(AIMessage(content=msg["content"]))
 
-            # Add current message
-            messages.append(HumanMessage(content=message))
+            # Add current message with context if available
+            if context_summary:
+                # Inject context into the message so the agent knows where we are
+                enhanced_message = f"{message}{context_summary}"
+                messages.append(HumanMessage(content=enhanced_message))
+            else:
+                messages.append(HumanMessage(content=message))
 
             # Run the agent with messages
             result = await self.agent.ainvoke({

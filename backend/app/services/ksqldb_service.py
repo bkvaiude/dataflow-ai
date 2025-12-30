@@ -732,6 +732,325 @@ class KsqlDBService:
             logger.error(f"[KSQLDB] Failed to get table info: {str(e)}")
             raise
 
+    # ============================================================================
+    # Phase 2: Transformation Layer - Filtered Streams and Aggregations
+    # ============================================================================
+
+    async def create_filtered_stream(
+        self,
+        source_stream: str,
+        output_stream_name: str,
+        where_clause: str,
+        select_columns: Optional[List[str]] = None,
+        output_topic: Optional[str] = None,
+        partitions: int = 3,
+        replicas: int = 3
+    ) -> Dict:
+        """
+        Create a filtered stream from a source stream using a WHERE clause.
+
+        This is the key transformation for applying user-specified filters like
+        "only login and logout events" → WHERE event_type IN ('login', 'logout')
+
+        Args:
+            source_stream: Name of the source ksqlDB stream
+            output_stream_name: Name for the new filtered stream
+            where_clause: SQL WHERE clause (without the WHERE keyword)
+                Example: "event_type IN ('login', 'logout')"
+            select_columns: Optional list of columns to include (default: all with *)
+            output_topic: Optional Kafka topic name (default: stream name)
+            partitions: Number of partitions for output topic
+            replicas: Replication factor for output topic
+
+        Returns:
+            Dict with stream_name, topic, query_id, and creation status
+        """
+        if not self.is_configured():
+            logger.info(f"[KSQLDB] Mock mode - would create filtered stream: {output_stream_name}")
+            return {
+                'stream_name': output_stream_name.upper(),
+                'source_stream': source_stream.upper(),
+                'where_clause': where_clause,
+                'topic': output_topic or output_stream_name.lower(),
+                'created': True,
+                'mock': True
+            }
+
+        # Build SELECT clause
+        if select_columns:
+            columns_sql = ", ".join([c.upper() for c in select_columns])
+        else:
+            columns_sql = "*"
+
+        # Build the CREATE STREAM AS SELECT query
+        query = f"SELECT {columns_sql} FROM {source_stream.upper()} WHERE {where_clause} EMIT CHANGES"
+
+        ksql = f"CREATE STREAM {output_stream_name.upper()} "
+        ksql += f"WITH (KAFKA_TOPIC='{output_topic or output_stream_name.lower()}', "
+        ksql += f"PARTITIONS={partitions}, REPLICAS={replicas}) "
+        ksql += f"AS {query};"
+
+        try:
+            result = await self._execute_ksql(ksql)
+
+            # Extract query ID from result if available
+            query_id = None
+            if result and len(result) > 0:
+                query_id = result[0].get('commandId') or result[0].get('queryId')
+
+            logger.info(f"[KSQLDB] Created filtered stream: {output_stream_name.upper()}")
+            return {
+                'stream_name': output_stream_name.upper(),
+                'source_stream': source_stream.upper(),
+                'where_clause': where_clause,
+                'topic': output_topic or output_stream_name.lower(),
+                'query_id': query_id,
+                'created': True,
+                'result': result
+            }
+
+        except Exception as e:
+            if "already exists" in str(e).lower():
+                logger.warning(f"[KSQLDB] Filtered stream already exists: {output_stream_name}")
+                return {
+                    'stream_name': output_stream_name.upper(),
+                    'already_exists': True,
+                    'created': False
+                }
+            raise
+
+    async def create_windowed_aggregation(
+        self,
+        source_stream: str,
+        output_table_name: str,
+        group_by_columns: List[str],
+        aggregations: List[Dict[str, str]],
+        window_type: str = "TUMBLING",
+        window_size: str = "1 HOUR",
+        where_clause: Optional[str] = None,
+        output_topic: Optional[str] = None,
+        partitions: int = 3,
+        replicas: int = 3
+    ) -> Dict:
+        """
+        Create a windowed aggregation table from a source stream.
+
+        This supports use cases like "count login events per hour" or
+        "average response time per minute".
+
+        Args:
+            source_stream: Name of the source ksqlDB stream
+            output_table_name: Name for the new aggregation table
+            group_by_columns: Columns to group by
+            aggregations: List of aggregations:
+                [{"function": "COUNT", "column": "*", "alias": "event_count"}]
+                [{"function": "SUM", "column": "amount", "alias": "total_amount"}]
+            window_type: TUMBLING, HOPPING, or SESSION
+            window_size: Size of window (e.g., "1 HOUR", "5 MINUTES")
+            where_clause: Optional WHERE filter before aggregation
+            output_topic: Optional Kafka topic name
+            partitions: Number of partitions for output topic
+            replicas: Replication factor for output topic
+
+        Returns:
+            Dict with table_name, topic, query_id, and creation status
+        """
+        if not self.is_configured():
+            logger.info(f"[KSQLDB] Mock mode - would create aggregation: {output_table_name}")
+            return {
+                'table_name': output_table_name.upper(),
+                'source_stream': source_stream.upper(),
+                'window_type': window_type,
+                'window_size': window_size,
+                'topic': output_topic or output_table_name.lower(),
+                'created': True,
+                'mock': True
+            }
+
+        # Build aggregation expressions
+        agg_exprs = []
+        for agg in aggregations:
+            func = agg.get('function', 'COUNT').upper()
+            col = agg.get('column', '*')
+            alias = agg.get('alias', f"{func.lower()}_{col.lower()}")
+
+            if col == '*':
+                agg_exprs.append(f"{func}(*) AS {alias.upper()}")
+            else:
+                agg_exprs.append(f"{func}({col.upper()}) AS {alias.upper()}")
+
+        # Build GROUP BY clause
+        group_by_sql = ", ".join([c.upper() for c in group_by_columns])
+
+        # Build window clause
+        window_sql = f"WINDOW {window_type.upper()} (SIZE {window_size})"
+
+        # Build SELECT clause
+        select_parts = [group_by_sql] + agg_exprs + ["WINDOWSTART AS window_start", "WINDOWEND AS window_end"]
+        select_sql = ", ".join(select_parts)
+
+        # Build full query
+        query = f"SELECT {select_sql} FROM {source_stream.upper()} "
+        if where_clause:
+            query += f"WHERE {where_clause} "
+        query += f"{window_sql} "
+        query += f"GROUP BY {group_by_sql} "
+        query += "EMIT CHANGES"
+
+        ksql = f"CREATE TABLE {output_table_name.upper()} "
+        ksql += f"WITH (KAFKA_TOPIC='{output_topic or output_table_name.lower()}', "
+        ksql += f"PARTITIONS={partitions}, REPLICAS={replicas}) "
+        ksql += f"AS {query};"
+
+        try:
+            result = await self._execute_ksql(ksql)
+
+            # Extract query ID from result if available
+            query_id = None
+            if result and len(result) > 0:
+                query_id = result[0].get('commandId') or result[0].get('queryId')
+
+            logger.info(f"[KSQLDB] Created aggregation table: {output_table_name.upper()}")
+            return {
+                'table_name': output_table_name.upper(),
+                'source_stream': source_stream.upper(),
+                'window_type': window_type,
+                'window_size': window_size,
+                'group_by': group_by_columns,
+                'aggregations': aggregations,
+                'topic': output_topic or output_table_name.lower(),
+                'query_id': query_id,
+                'created': True,
+                'result': result
+            }
+
+        except Exception as e:
+            if "already exists" in str(e).lower():
+                logger.warning(f"[KSQLDB] Aggregation table already exists: {output_table_name}")
+                return {
+                    'table_name': output_table_name.upper(),
+                    'already_exists': True,
+                    'created': False
+                }
+            raise
+
+    async def preview_transformation(
+        self,
+        source_stream: str,
+        where_clause: Optional[str] = None,
+        select_columns: Optional[List[str]] = None,
+        limit: int = 5
+    ) -> Dict:
+        """
+        Preview a transformation by running a pull query.
+
+        Use this to show users what their filter will return before creating
+        a persistent stream.
+
+        Args:
+            source_stream: Name of the source ksqlDB stream
+            where_clause: Optional WHERE clause to apply
+            select_columns: Optional list of columns (default: all)
+            limit: Number of rows to preview (default: 5)
+
+        Returns:
+            Dict with preview rows and metadata
+        """
+        if not self.is_configured():
+            logger.info(f"[KSQLDB] Mock mode - would preview transformation on: {source_stream}")
+            return {
+                'source_stream': source_stream.upper(),
+                'where_clause': where_clause,
+                'rows': [],
+                'preview': True,
+                'mock': True
+            }
+
+        # Build SELECT clause
+        if select_columns:
+            columns_sql = ", ".join([c.upper() for c in select_columns])
+        else:
+            columns_sql = "*"
+
+        # Build preview query
+        query = f"SELECT {columns_sql} FROM {source_stream.upper()}"
+        if where_clause:
+            query += f" WHERE {where_clause}"
+        query += f" LIMIT {limit}"
+
+        try:
+            # For push queries, we need to use the query endpoint
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.post(
+                    f"{self.ksqldb_url}/query",
+                    headers=self._get_headers(),
+                    json={
+                        "ksql": query + ";",
+                        "streamsProperties": {"ksql.streams.auto.offset.reset": "earliest"}
+                    }
+                )
+                response.raise_for_status()
+
+                # Parse streaming response (newline-delimited JSON)
+                rows = []
+                schema = None
+                for line in response.text.strip().split('\n'):
+                    if line:
+                        try:
+                            data = json.loads(line)
+                            if 'header' in data:
+                                schema = data['header'].get('schema')
+                            elif 'row' in data:
+                                rows.append(data['row']['columns'])
+                        except json.JSONDecodeError:
+                            continue
+
+                logger.info(f"[KSQLDB] Preview returned {len(rows)} rows")
+                return {
+                    'source_stream': source_stream.upper(),
+                    'where_clause': where_clause,
+                    'schema': schema,
+                    'rows': rows[:limit],
+                    'row_count': len(rows),
+                    'preview': True
+                }
+
+        except Exception as e:
+            logger.error(f"[KSQLDB] Preview failed: {str(e)}")
+            return {
+                'source_stream': source_stream.upper(),
+                'where_clause': where_clause,
+                'error': str(e),
+                'rows': [],
+                'preview': True
+            }
+
+    async def get_stream_for_topic(self, topic: str) -> Optional[str]:
+        """
+        Find the ksqlDB stream associated with a Kafka topic.
+
+        Args:
+            topic: Kafka topic name
+
+        Returns:
+            Stream name if found, None otherwise
+        """
+        if not self.is_configured():
+            return None
+
+        try:
+            streams = await self.list_streams()
+            for stream in streams:
+                stream_topic = stream.get('topic', '').lower()
+                if stream_topic == topic.lower():
+                    return stream.get('name')
+
+            return None
+
+        except Exception as e:
+            logger.error(f"[KSQLDB] Failed to find stream for topic: {str(e)}")
+            return None
+
     async def insert_into_stream(
         self,
         stream_name: str,

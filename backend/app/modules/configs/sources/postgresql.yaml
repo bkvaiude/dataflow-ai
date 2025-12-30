@@ -1,0 +1,113 @@
+# PostgreSQL Source Module Configuration
+# This enables CDC (Change Data Capture) from PostgreSQL databases
+# using Debezium connector
+
+module:
+  type: source
+  name: postgresql
+  display_name: "PostgreSQL"
+  icon: "database"
+  version: "1.0.0"
+
+capabilities:
+  supports_cdc: true
+  supports_full_load: true
+  supports_incremental: true
+  supported_formats:
+    - avro
+    - json
+
+credentials:
+  required:
+    - name: host
+      type: string
+      label: "Host"
+      placeholder: "localhost"
+    - name: port
+      type: integer
+      label: "Port"
+      default: 5432
+    - name: database
+      type: string
+      label: "Database Name"
+    - name: username
+      type: string
+      label: "Username"
+    - name: password
+      type: password
+      label: "Password"
+      encrypted: true
+  optional:
+    - name: ssl_mode
+      type: select
+      label: "SSL Mode"
+      options:
+        - disable
+        - require
+        - verify-ca
+        - verify-full
+      default: "require"
+
+connector_template:
+  class: "io.debezium.connector.postgresql.PostgresConnector"
+  config:
+    database.hostname: "{{ credentials.host }}"
+    database.port: "{{ credentials.port }}"
+    database.dbname: "{{ credentials.database }}"
+    database.user: "{{ credentials.username }}"
+    database.password: "{{ credentials.password }}"
+    database.server.name: "{{ pipeline.id }}"
+    table.include.list: "{{ tables | join(',') }}"
+    plugin.name: "pgoutput"
+    slot.name: "dataflow_{{ pipeline.id | replace('-', '_') }}"
+    publication.name: "dataflow_{{ pipeline.id | replace('-', '_') }}_pub"
+    publication.autocreate.mode: "filtered"
+    snapshot.mode: "initial"
+    key.converter: "io.confluent.connect.avro.AvroConverter"
+    key.converter.schema.registry.url: "{{ schema_registry.url }}"
+    key.converter.basic.auth.credentials.source: "USER_INFO"
+    key.converter.basic.auth.user.info: "{{ schema_registry.api_key }}:{{ schema_registry.api_secret }}"
+    value.converter: "io.confluent.connect.avro.AvroConverter"
+    value.converter.schema.registry.url: "{{ schema_registry.url }}"
+    value.converter.basic.auth.credentials.source: "USER_INFO"
+    value.converter.basic.auth.user.info: "{{ schema_registry.api_key }}:{{ schema_registry.api_secret }}"
+    transforms: "unwrap"
+    transforms.unwrap.type: "io.debezium.transforms.ExtractNewRecordState"
+    transforms.unwrap.drop.tombstones: "false"
+    transforms.unwrap.delete.handling.mode: "rewrite"
+    transforms.unwrap.add.fields: "op,table,source.ts_ms"
+    heartbeat.interval.ms: 60000
+    tombstones.on.delete: "true"
+
+schema_discovery:
+  query: |
+    SELECT table_schema, table_name, column_name, data_type, is_nullable
+    FROM information_schema.columns
+    WHERE table_schema NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+    ORDER BY table_schema, table_name, ordinal_position
+
+cdc_readiness_check:
+  queries:
+    - name: "WAL Level"
+      query: "SHOW wal_level"
+      expected: "logical"
+      error_message: "WAL level must be set to 'logical' for CDC"
+      fix: "ALTER SYSTEM SET wal_level = 'logical'; -- Requires restart"
+    - name: "Replication Permission"
+      query: "SELECT rolreplication FROM pg_roles WHERE rolname = current_user"
+      expected: "t"
+      error_message: "User must have REPLICATION privilege"
+      fix: "ALTER USER username REPLICATION;"
+    - name: "Max Replication Slots"
+      query: "SHOW max_replication_slots"
+      expected_min: 1
+      error_message: "Must have at least 1 replication slot available"
+    - name: "Max WAL Senders"
+      query: "SHOW max_wal_senders"
+      expected_min: 1
+      error_message: "Must have at least 1 WAL sender available"
+
+cost_factors:
+  base_task_cost: 0.01  # $/hour per connector task
+  throughput_multiplier: 1.0
+  recommended_tasks: 1

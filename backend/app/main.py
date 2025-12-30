@@ -115,6 +115,26 @@ async def chat_message(sid, data):
                 response = await confirmation_handlers.handle_table_confirmation(
                     confirmation, user_id
                 )
+            elif action_type == 'confirm_filter':
+                response = await confirmation_handlers.handle_filter_confirmation(
+                    confirmation, user_id
+                )
+            elif action_type == 'confirm_schema':
+                response = await confirmation_handlers.handle_schema_confirmation(
+                    confirmation, user_id
+                )
+            elif action_type == 'confirm_topic':
+                response = await confirmation_handlers.handle_topic_confirmation(
+                    confirmation, user_id
+                )
+            elif action_type == 'confirm_cost':
+                response = await confirmation_handlers.handle_cost_confirmation(
+                    confirmation, user_id
+                )
+            elif action_type == 'confirm_resources':
+                response = await confirmation_handlers.handle_resources_confirmation(
+                    confirmation, user_id
+                )
             elif action_type == 'confirm_destination':
                 response = await confirmation_handlers.handle_destination_confirmation(
                     confirmation, user_id

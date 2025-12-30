@@ -1,0 +1,123 @@
+# Filter Transform Configuration
+# Creates a filtered stream based on WHERE clause conditions
+
+transform:
+  name: filter
+  display_name: "Row Filter"
+  description: "Filter rows based on column values"
+  icon: "filter"
+  version: "1.0.0"
+
+parameters:
+  - name: column
+    type: column_select
+    label: "Filter Column"
+    description: "Column to filter on"
+    required: true
+
+  - name: operator
+    type: select
+    label: "Operator"
+    options:
+      - value: "="
+        label: "Equals"
+      - value: "!="
+        label: "Not Equals"
+      - value: ">"
+        label: "Greater Than"
+      - value: "<"
+        label: "Less Than"
+      - value: ">="
+        label: "Greater or Equal"
+      - value: "<="
+        label: "Less or Equal"
+      - value: "IN"
+        label: "In List"
+      - value: "NOT IN"
+        label: "Not In List"
+      - value: "LIKE"
+        label: "Like Pattern"
+      - value: "IS NULL"
+        label: "Is Null"
+      - value: "IS NOT NULL"
+        label: "Is Not Null"
+    required: true
+
+  - name: value
+    type: dynamic
+    label: "Filter Value"
+    description: "Value to compare against (or comma-separated list for IN/NOT IN)"
+    required: false  # Not required for IS NULL / IS NOT NULL
+
+ksqldb_template: |
+  CREATE STREAM {{ output_stream }}
+  WITH (
+    KAFKA_TOPIC='{{ output_topic }}',
+    VALUE_FORMAT='{{ value_format | default('AVRO') }}',
+    PARTITIONS={{ partitions | default(6) }}
+  ) AS
+  SELECT *
+  FROM {{ source_stream }}
+  WHERE {{ column }} {{ operator }} {% if value %}{{ value }}{% endif %}
+  EMIT CHANGES;
+
+ai_hints:
+  keywords:
+    - only
+    - filter
+    - where
+    - specific
+    - just
+    - exclude
+    - without
+    - except
+    - ignore
+
+  example_prompts:
+    - input: "sync only login events"
+      output:
+        column: "event_type"
+        operator: "="
+        value: "'login'"
+
+    - input: "only login and logout events"
+      output:
+        column: "event_type"
+        operator: "IN"
+        value: "('login', 'logout')"
+
+    - input: "exclude deleted records"
+      output:
+        column: "deleted"
+        operator: "!="
+        value: "true"
+
+    - input: "non-deleted records"
+      output:
+        column: "deleted"
+        operator: "="
+        value: "false"
+
+    - input: "users from US"
+      output:
+        column: "country"
+        operator: "="
+        value: "'US'"
+
+    - input: "orders over $100"
+      output:
+        column: "amount"
+        operator: ">"
+        value: "100"
+
+    - input: "active users only"
+      output:
+        column: "is_active"
+        operator: "="
+        value: "true"
+
+    - input: "records with email"
+      output:
+        column: "email"
+        operator: "IS NOT NULL"
+        value: null

@@ -33,6 +33,17 @@ function formatNumber(num: number): string {
   return `${(num / 1000000000).toFixed(1)}B`;
 }
 
+function formatUpdatedAt(dateValue: string | number | undefined): string {
+  if (!dateValue) return 'just now';
+  try {
+    const date = new Date(dateValue);
+    if (isNaN(date.getTime())) return 'just now';
+    return formatDistanceToNow(date, { addSuffix: true });
+  } catch {
+    return 'just now';
+  }
+}
+
 export function PipelineMetrics({ metrics, isLoading, onRefresh }: PipelineMetricsProps) {
   if (isLoading) {
     return (
@@ -56,9 +67,14 @@ export function PipelineMetrics({ metrics, isLoading, onRefresh }: PipelineMetri
     );
   }
 
-  const lagStatus = metrics.lag.currentMs < 1000
+  // Safe defaults for nested objects
+  const throughput = metrics.throughput ?? { eventsPerSecond: 0, bytesPerSecond: 0, totalEvents: 0 };
+  const lag = metrics.lag ?? { currentMs: 0, avgMs: 0, maxMs: 1 };
+  const windowSeconds = metrics.windowSeconds ?? 60;
+
+  const lagStatus = lag.currentMs < 1000
     ? { color: 'text-emerald-400', bg: 'bg-emerald-500/10', label: 'Healthy' }
-    : metrics.lag.currentMs < 5000
+    : lag.currentMs < 5000
       ? { color: 'text-amber-400', bg: 'bg-amber-500/10', label: 'Moderate' }
       : { color: 'text-red-400', bg: 'bg-red-500/10', label: 'High' };
 
@@ -73,7 +89,7 @@ export function PipelineMetrics({ metrics, isLoading, onRefresh }: PipelineMetri
           <div>
             <h3 className="font-display font-semibold text-foreground">Pipeline Metrics</h3>
             <p className="text-xs text-muted-foreground">
-              Last {metrics.windowSeconds}s window • Updated {formatDistanceToNow(new Date(metrics.updatedAt), { addSuffix: true })}
+              Last {windowSeconds}s window • Updated {formatUpdatedAt(metrics.updatedAt)}
             </p>
           </div>
         </div>
@@ -97,11 +113,11 @@ export function PipelineMetrics({ metrics, isLoading, onRefresh }: PipelineMetri
             <span className="text-xs text-muted-foreground">Throughput</span>
           </div>
           <div className="text-2xl font-display font-bold text-foreground">
-            {metrics.throughput.eventsPerSecond.toFixed(1)}
+            {(throughput.eventsPerSecond ?? 0).toFixed(1)}
             <span className="text-sm font-normal text-muted-foreground ml-1">/s</span>
           </div>
           <div className="text-xs text-muted-foreground mt-1">
-            {formatBytes(metrics.throughput.bytesPerSecond)}/s
+            {formatBytes(throughput.bytesPerSecond ?? 0)}/s
           </div>
         </div>
 
@@ -112,9 +128,9 @@ export function PipelineMetrics({ metrics, isLoading, onRefresh }: PipelineMetri
             <span className="text-xs text-muted-foreground">Current Lag</span>
           </div>
           <div className={`text-2xl font-display font-bold ${lagStatus.color}`}>
-            {metrics.lag.currentMs < 1000
-              ? `${metrics.lag.currentMs}ms`
-              : `${(metrics.lag.currentMs / 1000).toFixed(1)}s`}
+            {lag.currentMs < 1000
+              ? `${lag.currentMs}ms`
+              : `${(lag.currentMs / 1000).toFixed(1)}s`}
           </div>
           <div className="text-xs text-muted-foreground mt-1">
             {lagStatus.label} latency
@@ -128,7 +144,7 @@ export function PipelineMetrics({ metrics, isLoading, onRefresh }: PipelineMetri
             <span className="text-xs text-muted-foreground">Total Events</span>
           </div>
           <div className="text-2xl font-display font-bold text-foreground">
-            {formatNumber(metrics.throughput.totalEvents)}
+            {formatNumber(throughput.totalEvents ?? 0)}
           </div>
           <div className="text-xs text-muted-foreground mt-1">
             Processed events
@@ -143,19 +159,19 @@ export function PipelineMetrics({ metrics, isLoading, onRefresh }: PipelineMetri
           <div>
             <div className="text-xs text-muted-foreground mb-1">Current</div>
             <div className="text-sm font-mono text-foreground">
-              {metrics.lag.currentMs}ms
+              {lag.currentMs}ms
             </div>
           </div>
           <div>
             <div className="text-xs text-muted-foreground mb-1">Average</div>
             <div className="text-sm font-mono text-foreground">
-              {metrics.lag.avgMs.toFixed(0)}ms
+              {(lag.avgMs ?? 0).toFixed(0)}ms
             </div>
           </div>
           <div>
             <div className="text-xs text-muted-foreground mb-1">Max</div>
             <div className="text-sm font-mono text-foreground">
-              {metrics.lag.maxMs}ms
+              {lag.maxMs}ms
             </div>
           </div>
         </div>
@@ -165,20 +181,20 @@ export function PipelineMetrics({ metrics, isLoading, onRefresh }: PipelineMetri
           <div className="h-2 bg-white/5 rounded-full overflow-hidden">
             <div
               className={`h-full transition-all duration-500 ${
-                metrics.lag.currentMs < 1000
+                lag.currentMs < 1000
                   ? 'bg-emerald-500'
-                  : metrics.lag.currentMs < 5000
+                  : lag.currentMs < 5000
                     ? 'bg-amber-500'
                     : 'bg-red-500'
               }`}
               style={{
-                width: `${Math.min((metrics.lag.currentMs / metrics.lag.maxMs) * 100, 100)}%`,
+                width: `${Math.min((lag.currentMs / (lag.maxMs || 1)) * 100, 100)}%`,
               }}
             />
           </div>
           <div className="flex justify-between text-xs text-muted-foreground mt-1">
             <span>0ms</span>
-            <span>{metrics.lag.maxMs}ms</span>
+            <span>{lag.maxMs}ms</span>
           </div>
         </div>
       </div>
@@ -200,7 +216,7 @@ export function PipelineMetrics({ metrics, isLoading, onRefresh }: PipelineMetri
           })}
         </div>
         <div className="flex justify-between text-xs text-muted-foreground mt-2">
-          <span>-{metrics.windowSeconds}s</span>
+          <span>-{windowSeconds}s</span>
           <span>Now</span>
         </div>
       </div>
