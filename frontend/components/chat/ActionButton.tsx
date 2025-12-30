@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import type { ChatAction, AlertRuleType, AlertSeverity } from '@/types';
-import { ExternalLink, Link2, Zap, Loader2, AlertTriangle, RefreshCw, X, Database, Table, Server, Bell, FileJson, GitBranch } from 'lucide-react';
+import { ExternalLink, Link2, Zap, Loader2, AlertTriangle, RefreshCw, X, Database, Table, Server, Bell, FileJson, GitBranch, Filter } from 'lucide-react';
 import { initiateOAuth } from '@/lib/api';
 import { useAuthStore } from '@/stores/authStore';
 import { useChatStore } from '@/stores/chatStore';
@@ -28,6 +28,7 @@ import {
   ClickHouseConfigForm,
   SchemaPreviewForm,
   TopicRegistryConfirmation,
+  FilterConfirmation,
 } from './confirmations';
 import type { SchemaPreviewContext } from '@/types';
 
@@ -55,7 +56,8 @@ export function ActionButton({ action, onClick }: ActionButtonProps) {
       action.type === 'confirm_action' ||
       action.type === 'confirm_clickhouse_config' ||
       action.type === 'confirm_schema_preview' ||
-      action.type === 'confirm_topic_registry'
+      action.type === 'confirm_topic_registry' ||
+      action.type === 'confirm_filter'
     ) {
       setShowConfirmation(true);
     }
@@ -314,6 +316,27 @@ export function ActionButton({ action, onClick }: ActionButtonProps) {
     });
   };
 
+  // Filter confirmation (apply or skip)
+  const handleFilterConfirm = (applyFilter: boolean) => {
+    if (!action.filterContext) return;
+    setIsLoading(true);
+    if (applyFilter) {
+      sendConfirmation('confirm_filter', {
+        filterSql: action.filterContext.filterSql,
+        filterColumn: action.filterContext.filterColumn,
+        filterValues: action.filterContext.filterValues,
+        filteredRowCount: action.filterContext.filteredRowCount,
+        sessionId: action.filterContext.sessionId,
+      });
+    } else {
+      // User chose to skip filter - send cancellation
+      sendConfirmation('confirm_filter', {
+        cancelled: true,
+        sessionId: action.filterContext.sessionId,
+      });
+    }
+  };
+
   const handleClick = () => {
     if (action.type === 'oauth') {
       handleOAuthClick();
@@ -355,6 +378,8 @@ export function ActionButton({ action, onClick }: ActionButtonProps) {
         return <FileJson className="w-4 h-4" />;
       case 'confirm_topic_registry':
         return <GitBranch className="w-4 h-4" />;
+      case 'confirm_filter':
+        return <Filter className="w-4 h-4" />;
       default:
         return <Link2 className="w-4 h-4" />;
     }
@@ -526,6 +551,41 @@ export function ActionButton({ action, onClick }: ActionButtonProps) {
           context={action.topicContext}
           onConfirm={handleTopicConfirm}
           onCancel={() => sendCancellation('confirm_topic_registry', action.topicContext?.sessionId)}
+        />
+      </div>
+    );
+  }
+
+  // Render filter confirmation
+  if (action.type === 'confirm_filter' && action.filterContext && showConfirmation) {
+    // Map backend filterContext to the FilterConfirmContext expected by FilterConfirmation
+    const filterConfirmContext = {
+      originalRequirement: action.filterContext.filterDescription || '',
+      column: action.filterContext.filterColumn || '',
+      operator: action.filterContext.filterOperator || 'IN',
+      values: action.filterContext.filterValues || [],
+      sqlWhere: action.filterContext.filterSql || '',
+      totalRows: action.filterContext.originalRowCount || 0,
+      filteredRows: action.filterContext.filteredRowCount || 0,
+      filterRatio: action.filterContext.originalRowCount
+        ? (action.filterContext.filteredRowCount || 0) / action.filterContext.originalRowCount
+        : 0,
+      reductionPercent: action.filterContext.originalRowCount
+        ? 100 - ((action.filterContext.filteredRowCount || 0) / action.filterContext.originalRowCount) * 100
+        : 0,
+      previewRows: action.filterContext.sampleData || [],
+      previewColumns: action.filterContext.tableColumns?.map((c: { name: string }) => c.name) || [],
+      alternativeColumns: [],
+      confidence: action.filterContext.confidence || 0.7,
+      sessionId: action.filterContext.sessionId || '',
+    };
+
+    return (
+      <div className="w-full py-2">
+        <FilterConfirmation
+          context={filterConfirmContext}
+          onConfirm={handleFilterConfirm}
+          onCancel={() => sendCancellation('confirm_filter', action.filterContext?.sessionId)}
         />
       </div>
     );

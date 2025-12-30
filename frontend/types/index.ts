@@ -26,6 +26,7 @@ export type ChatActionType =
   | 'confirm_credentials'      // Secure credential form (fallback when no sources)
   | 'confirm_destination'      // Choose sink (ClickHouse/Kafka)
   | 'confirm_tables'           // Multi-select tables
+  | 'confirm_filter'           // Data filter confirmation
   | 'confirm_pipeline_create'  // Final pipeline confirmation
   | 'confirm_alert_config'     // Alert settings form
   | 'confirm_action'           // Generic yes/no confirmation
@@ -51,6 +52,7 @@ export interface ChatAction {
   credentialContext?: CredentialConfirmContext;
   tableContext?: TableConfirmContext;
   destinationContext?: DestinationConfirmContext;
+  filterContext?: FilterConfirmContext;
   pipelineContext?: PipelineConfirmContext;
   alertContext?: AlertConfirmContext;
   actionContext?: GenericActionContext;
@@ -109,6 +111,23 @@ export interface DestinationConfirmContext {
     available: boolean;
     recommended?: boolean;
   }>;
+  sessionId: string;
+}
+
+// Context for data filter confirmation
+export interface FilterConfirmContext {
+  credentialId: string;
+  table: string;
+  filterSql: string;
+  filterColumn: string;
+  filterOperator: string;
+  filterValues: string[];
+  filterDescription: string;
+  confidence: number;
+  originalRowCount: number;
+  filteredRowCount?: number;
+  sampleData?: Array<Record<string, unknown>>;
+  tableColumns?: Array<{ name: string; type: string }>;
   sessionId: string;
 }
 

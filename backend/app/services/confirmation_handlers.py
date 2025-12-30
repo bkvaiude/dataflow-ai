@@ -16,6 +16,8 @@ from app.services.cdc_readiness_service import cdc_readiness_service
 from app.db.models import Pipeline
 from app.services.db_service import db_service
 from app.services.alert_service import alert_service
+from app.services.conversation_context import get_context
+from app.services.filter_generator import filter_generator
 
 
 class ConfirmationHandlers:
@@ -58,6 +60,45 @@ class ConfirmationHandlers:
 
         session_id = data.get('sessionId', str(uuid.uuid4()))
         session = self._get_session(session_id)
+
+        # BRIDGE: Copy AI requirements from ConversationContext to handler session
+        try:
+            # Try to find context by session_id first, then search all contexts for user_id
+            from app.services.conversation_context import get_all_contexts
+            ai_context = None
+
+            # First try direct lookup
+            ai_context = get_context(session_id, user_id)
+            print(f"[CONTEXT_BRIDGE] Direct lookup for session_id={session_id}, user_id={user_id}")
+
+            # If no requirements, search all contexts for this user
+            if not ai_context or not ai_context.requirements or not ai_context.requirements.filter_requirement:
+                print(f"[CONTEXT_BRIDGE] Direct lookup failed, searching all contexts...")
+                all_contexts = get_all_contexts()
+                for ctx_id, ctx in all_contexts.items():
+                    if ctx.user_id == user_id and ctx.requirements:
+                        print(f"[CONTEXT_BRIDGE] Found context {ctx_id} for user {user_id}")
+                        if ctx.requirements.filter_requirement:
+                            ai_context = ctx
+                            print(f"[CONTEXT_BRIDGE] Found filter_requirement in context {ctx_id}: {ctx.requirements.filter_requirement}")
+                            break
+
+            if ai_context and ai_context.requirements:
+                if ai_context.requirements.filter_requirement:
+                    session['filter_requirement'] = ai_context.requirements.filter_requirement
+                    print(f"[CONTEXT_BRIDGE] Copied filter_requirement: {session['filter_requirement']}")
+                if ai_context.requirements.alert_requirement:
+                    session['alert_requirement'] = ai_context.requirements.alert_requirement
+                if ai_context.requirements.destination_hint:
+                    session['destination_hint'] = ai_context.requirements.destination_hint
+                if ai_context.requirements.table_hint:
+                    session['table_hint'] = ai_context.requirements.table_hint
+            else:
+                print(f"[CONTEXT_BRIDGE] No AI context found with requirements")
+        except Exception as e:
+            import traceback
+            print(f"[CONTEXT_BRIDGE] Warning: Could not bridge context: {e}")
+            traceback.print_exc()
 
         # Check if user wants to create new source
         if data.get('createNew'):
@@ -271,11 +312,67 @@ class ConfirmationHandlers:
         # Check if there's a filter requirement stored in session (from AI context)
         filter_requirement = session.get('filter_requirement')
         if filter_requirement:
-            # Proceed to filter confirmation
-            return {
-                'message': f"Great! You've selected {len(selected_tables)} table(s). I noticed you want to filter data. Let me show you the filter options.",
-                'actions': []  # AI will handle filter confirmation
-            }
+            print(f"[FILTER_FLOW] Detected filter requirement: {filter_requirement}")
+
+            # Get table schema for filter generation
+            try:
+                schema_result = schema_discovery_service.discover(
+                    user_id=user_id,
+                    credential_id=credential_id,
+                    schema_filter='public',
+                    include_row_counts=True
+                )
+
+                # Find the selected table's columns
+                table_columns = []
+                table_row_count = 0
+                for table in schema_result.get('tables', []):
+                    full_name = f"{table.get('schema_name')}.{table.get('table_name')}"
+                    if full_name == selected_tables[0]:
+                        table_columns = [
+                            {
+                                'name': col.get('column_name'),
+                                'type': col.get('data_type'),
+                                'nullable': col.get('is_nullable', True)
+                            }
+                            for col in table.get('columns', [])
+                        ]
+                        table_row_count = table.get('row_count_estimate', 0)
+                        break
+
+                # Generate filter using the filter_generator
+                if table_columns:
+                    filter_config = filter_generator.generate(
+                        requirement=filter_requirement,
+                        columns=table_columns
+                    )
+
+                    print(f"[FILTER_FLOW] Generated filter: {filter_config.sql_where}")
+
+                    # Return filter confirmation action
+                    return {
+                        'message': f"Great! You've selected {len(selected_tables)} table(s). I detected your filter requirement: \"{filter_requirement}\"",
+                        'actions': [{
+                            'type': 'confirm_filter',
+                            'label': 'Review Filter',
+                            'filterContext': {
+                                'credentialId': credential_id,
+                                'table': selected_tables[0],
+                                'filterSql': filter_config.sql_where,
+                                'filterColumn': filter_config.column,
+                                'filterOperator': filter_config.operator,
+                                'filterValues': filter_config.values,
+                                'filterDescription': filter_requirement,
+                                'confidence': filter_config.confidence,
+                                'originalRowCount': table_row_count,
+                                'tableColumns': table_columns,
+                                'sessionId': session_id
+                            }
+                        }]
+                    }
+            except Exception as e:
+                print(f"[FILTER_FLOW] Error generating filter: {e}")
+                # Fall through to destination selection if filter generation fails
 
         # Return destination selection action
         return {
