@@ -2008,7 +2008,7 @@ def _generate_fallback_schema(
         'clickhouse_table': table_name.split('.')[-1],
         'source_table': table_name,
         'columns': clickhouse_columns,
-        'engine': 'ReplacingMergeTree(_version)',
+        'engine': 'MergeTree',  # Use MergeTree by default (no _version column needed)
         'order_by': order_by,
         'partition_by': partition_by,
         'recommendations': recommendations,
@@ -2025,7 +2025,7 @@ def _generate_create_table_sql(schema: Dict[str, Any]) -> str:
     """Generate CREATE TABLE SQL from schema definition"""
     table_name = schema['clickhouse_table']
     columns = schema['columns']
-    engine = schema.get('engine', 'ReplacingMergeTree(_version)')
+    engine = schema.get('engine', 'MergeTree')
     order_by = schema.get('order_by', [])
     partition_by = schema.get('partition_by')
 
@@ -2040,10 +2040,16 @@ def _generate_create_table_sql(schema: Dict[str, Any]) -> str:
     columns_sql = ",\n".join(col_defs)
     order_by_sql = ", ".join(f"`{c}`" for c in order_by)
 
+    # Handle engine specification - add () if not present
+    if '(' not in engine:
+        engine_spec = f"{engine}()"
+    else:
+        engine_spec = engine
+
     sql = f"""CREATE TABLE IF NOT EXISTS {table_name} (
 {columns_sql}
 )
-ENGINE = {engine}"""
+ENGINE = {engine_spec}"""
 
     if partition_by:
         sql += f"\nPARTITION BY {partition_by}"

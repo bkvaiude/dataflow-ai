@@ -791,14 +791,19 @@ class KsqlDBService:
         ksql += f"AS {query};"
 
         try:
-            result = await self._execute_ksql(ksql)
+            # Use auto.offset.reset=earliest to read from beginning of topic
+            # This ensures we process all historical data, not just new messages
+            stream_properties = {
+                "ksql.streams.auto.offset.reset": "earliest"
+            }
+            result = await self._execute_ksql(ksql, stream_properties)
 
             # Extract query ID from result if available
             query_id = None
             if result and len(result) > 0:
                 query_id = result[0].get('commandId') or result[0].get('queryId')
 
-            logger.info(f"[KSQLDB] Created filtered stream: {output_stream_name.upper()}")
+            logger.info(f"[KSQLDB] Created filtered stream: {output_stream_name.upper()} (reading from earliest)")
             return {
                 'stream_name': output_stream_name.upper(),
                 'source_stream': source_stream.upper(),

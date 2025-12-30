@@ -540,46 +540,35 @@ async def start_pipeline(
                                 ksql_type = 'STRING'
                             ksql_schema.append({'name': col['name'], 'type': ksql_type})
 
-                        # Create source stream (async call)
-                        import asyncio
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        try:
-                            # Create source stream
-                            source_result = loop.run_until_complete(
-                                ksqldb_service.create_stream(
-                                    name=source_stream_name,
-                                    topic=raw_topic,
-                                    schema=ksql_schema,
-                                    value_format="AVRO"
-                                )
-                            )
-                            pipeline_monitor.log_event(
-                                pipeline_id,
-                                "ksql_stream_created",
-                                f"Created ksqlDB source stream: {source_stream_name}"
-                            )
+                        # Create source stream (async call - use await since we're in async context)
+                        # Create source stream
+                        source_result = await ksqldb_service.create_stream(
+                            name=source_stream_name,
+                            topic=raw_topic,
+                            schema=ksql_schema,
+                            value_format="AVRO"
+                        )
+                        pipeline_monitor.log_event(
+                            pipeline_id,
+                            "ksql_stream_created",
+                            f"Created ksqlDB source stream: {source_stream_name}"
+                        )
 
-                            # Step 2: Create filtered stream with WHERE clause
-                            filtered_result = loop.run_until_complete(
-                                ksqldb_service.create_filtered_stream(
-                                    source_stream=source_stream_name,
-                                    output_stream_name=filtered_stream_name,
-                                    where_clause=filter_sql,
-                                    output_topic=filtered_topic
-                                )
-                            )
-                            pipeline_monitor.log_event(
-                                pipeline_id,
-                                "ksql_filter_created",
-                                f"Created ksqlDB filtered stream: {filtered_stream_name} with filter: {filter_sql}"
-                            )
+                        # Step 2: Create filtered stream with WHERE clause
+                        filtered_result = await ksqldb_service.create_filtered_stream(
+                            source_stream=source_stream_name,
+                            output_stream_name=filtered_stream_name,
+                            where_clause=filter_sql,
+                            output_topic=filtered_topic
+                        )
+                        pipeline_monitor.log_event(
+                            pipeline_id,
+                            "ksql_filter_created",
+                            f"Created ksqlDB filtered stream: {filtered_stream_name} with filter: {filter_sql}"
+                        )
 
-                            # Map raw topic to filtered topic for sink connector
-                            filtered_topics[raw_topic] = filtered_topic
-
-                        finally:
-                            loop.close()
+                        # Map raw topic to filtered topic for sink connector
+                        filtered_topics[raw_topic] = filtered_topic
 
             except Exception as ksql_err:
                 # Log warning but don't fail - sink will use raw topic
@@ -646,14 +635,54 @@ async def start_pipeline(
                     columns = approved_schema.get('columns', [])
 
                     if columns:
+                        # =================================================================
+                        # KSQLDB COMPATIBILITY: Transform schema for ksqlDB output
+                        # =================================================================
+                        # When using ksqlDB filtering, the output has:
+                        # 1. UPPERCASE column names (ksqlDB standard)
+                        # 2. __DELETED column from Debezium's delete handling
+                        # We must match the ClickHouse table schema to ksqlDB output
+
+                        uses_ksqldb = bool(filtered_topics)  # True if ksqlDB filtering is active
+
+                        if uses_ksqldb:
+                            # Transform columns for ksqlDB compatibility
+                            ksql_columns = []
+                            for col in columns:
+                                # Skip CDC metadata columns that we added previously
+                                if col['name'].startswith('_') and col['name'] not in ['__deleted', '__DELETED']:
+                                    continue
+                                ksql_columns.append({
+                                    'name': col['name'].upper(),  # ksqlDB outputs UPPERCASE
+                                    'clickhouseType': col.get('clickhouseType', col.get('type', 'String')),  # Use clickhouseType key!
+                                    'nullable': col.get('nullable', True),
+                                    'is_primary_key': col.get('is_primary_key', col.get('isPrimaryKey', False))
+                                })
+
+                            # Add __DELETED column from Debezium (ksqlDB passes this through)
+                            ksql_columns.append({
+                                'name': '__DELETED',
+                                'clickhouseType': 'String',  # Use clickhouseType key!
+                                'nullable': True,
+                                'is_primary_key': False
+                            })
+
+                            table_columns = ksql_columns
+                            engine = "MergeTree"  # Use MergeTree since we don't have _version
+                            print(f"[PIPELINE] Using ksqlDB-compatible schema with {len(table_columns)} UPPERCASE columns")
+                        else:
+                            # Direct Debezium to ClickHouse - use original lowercase columns
+                            table_columns = columns
+                            engine = "ReplacingMergeTree"
+
                         # IMPORTANT: ClickHouse sink connector uses topic name as table name by default
                         # So we must create tables with topic names (with dots escaped via backticks)
                         for topic_name in topics:
                             try:
                                 clickhouse_service.create_table(
                                     table_name=topic_name,  # Use topic name directly
-                                    columns=columns,
-                                    engine="ReplacingMergeTree"
+                                    columns=table_columns,
+                                    engine=engine
                                 )
                                 pipeline_monitor.log_event(
                                     pipeline_id,

@@ -257,11 +257,29 @@ class ClickHouseService:
             # Build CREATE TABLE statement
             # Use backticks to escape table names with dots (e.g., from Kafka topic names)
             escaped_table_name = f"`{table_name}`" if "." in table_name else table_name
+
+            # Handle engine specification
+            # - MergeTree: no version column needed
+            # - ReplacingMergeTree: requires version column for deduplication
+            existing_col_names = {c['name'].upper() for c in columns}
+            if engine == "MergeTree":
+                engine_spec = "MergeTree()"
+            elif engine == "ReplacingMergeTree":
+                # Check if _version column exists (for CDC upserts)
+                if '_VERSION' in existing_col_names or '_version' in {c['name'] for c in columns}:
+                    engine_spec = "ReplacingMergeTree(_version)"
+                else:
+                    # Fallback to MergeTree if no version column
+                    engine_spec = "MergeTree()"
+                    print(f"[CLICKHOUSE] No _version column found, using MergeTree instead of ReplacingMergeTree")
+            else:
+                engine_spec = f"{engine}()"
+
             sql = f"""
             CREATE TABLE IF NOT EXISTS {self.database}.{escaped_table_name} (
                 {columns_sql}
             )
-            ENGINE = {engine}(_version)
+            ENGINE = {engine_spec}
             """
 
             if partition_by:
