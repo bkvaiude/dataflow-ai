@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import type { ChatAction, AlertRuleType, AlertSeverity } from '@/types';
-import { ExternalLink, Link2, Zap, Loader2, AlertTriangle, RefreshCw, X, Database, Table, Server, Bell, FileJson, GitBranch, Filter } from 'lucide-react';
+import { ExternalLink, Link2, Zap, Loader2, AlertTriangle, RefreshCw, X, Database, Table, Server, Bell, FileJson, GitBranch, Filter, DollarSign } from 'lucide-react';
 import { initiateOAuth } from '@/lib/api';
 import { useAuthStore } from '@/stores/authStore';
 import { useChatStore } from '@/stores/chatStore';
@@ -29,6 +29,7 @@ import {
   SchemaPreviewForm,
   TopicRegistryConfirmation,
   FilterConfirmation,
+  CostEstimate,
 } from './confirmations';
 import type { SchemaPreviewContext } from '@/types';
 
@@ -51,6 +52,7 @@ export function ActionButton({ action, onClick }: ActionButtonProps) {
       action.type === 'confirm_credentials' ||
       action.type === 'confirm_tables' ||
       action.type === 'confirm_destination' ||
+      action.type === 'confirm_cost' ||
       action.type === 'confirm_pipeline_create' ||
       action.type === 'confirm_alert_config' ||
       action.type === 'confirm_action' ||
@@ -337,6 +339,16 @@ export function ActionButton({ action, onClick }: ActionButtonProps) {
     }
   };
 
+  // Cost estimation confirmation
+  const handleCostConfirm = () => {
+    if (!action.costContext) return;
+    setIsLoading(true);
+    sendConfirmation('confirm_cost', {
+      estimatedCost: action.costContext.totals,
+      sessionId: action.costContext.sessionId,
+    });
+  };
+
   const handleClick = () => {
     if (action.type === 'oauth') {
       handleOAuthClick();
@@ -380,6 +392,8 @@ export function ActionButton({ action, onClick }: ActionButtonProps) {
         return <GitBranch className="w-4 h-4" />;
       case 'confirm_filter':
         return <Filter className="w-4 h-4" />;
+      case 'confirm_cost':
+        return <DollarSign className="w-4 h-4" />;
       default:
         return <Link2 className="w-4 h-4" />;
     }
@@ -586,6 +600,19 @@ export function ActionButton({ action, onClick }: ActionButtonProps) {
           context={filterConfirmContext}
           onConfirm={handleFilterConfirm}
           onCancel={() => sendCancellation('confirm_filter', action.filterContext?.sessionId)}
+        />
+      </div>
+    );
+  }
+
+  // Render cost estimate confirmation
+  if (action.type === 'confirm_cost' && action.costContext && showConfirmation) {
+    return (
+      <div className="w-full py-2">
+        <CostEstimate
+          context={action.costContext}
+          onConfirm={handleCostConfirm}
+          onCancel={() => sendCancellation('confirm_cost', action.costContext?.sessionId)}
         />
       </div>
     );

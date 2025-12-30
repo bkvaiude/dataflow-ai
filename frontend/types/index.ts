@@ -27,6 +27,7 @@ export type ChatActionType =
   | 'confirm_destination'      // Choose sink (ClickHouse/Kafka)
   | 'confirm_tables'           // Multi-select tables
   | 'confirm_filter'           // Data filter confirmation
+  | 'confirm_cost'             // Cost estimation before pipeline creation
   | 'confirm_pipeline_create'  // Final pipeline confirmation
   | 'confirm_alert_config'     // Alert settings form
   | 'confirm_action'           // Generic yes/no confirmation
@@ -60,6 +61,41 @@ export interface ChatAction {
   clickhouseContext?: ClickHouseConfigContext;
   schemaContext?: SchemaPreviewContext;
   topicContext?: TopicRegistryContext;
+  // Cost estimation context
+  costContext?: CostEstimateContext;
+}
+
+// Cost component for cost estimation
+export interface CostComponent {
+  name: string;
+  description: string;
+  unitCost: number;
+  unit: string;
+  quantity: number;
+  dailyCost: number;
+  monthlyCost: number;
+}
+
+// Cost estimation context for confirm_cost action
+export interface CostEstimateContext {
+  pipelineName: string;
+  components: CostComponent[];
+  totals: {
+    daily: number;
+    monthly: number;
+    yearly: number;
+  };
+  notes: string[];
+  assumptions: {
+    tables?: number;
+    estimatedEventsPerDay?: number;
+    effectiveEventsPerDay?: number;
+    avgRowSizeBytes?: number;
+    filterApplied?: boolean;
+    filterReductionPercent?: number;
+    aggregationApplied?: boolean;
+  };
+  sessionId: string;
 }
 
 // ============================================================================

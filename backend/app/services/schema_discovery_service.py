@@ -430,5 +430,99 @@ class SchemaDiscoveryService:
             session.close()
 
 
+    def get_filter_preview(
+        self,
+        user_id: str,
+        credential_id: str,
+        schema_name: str,
+        table_name: str,
+        filter_sql: str,
+        limit: int = 5
+    ) -> Dict[str, Any]:
+        """
+        Get preview data for a filter - count matching rows and sample data.
+
+        Args:
+            user_id: User ID
+            credential_id: ID of stored credentials
+            schema_name: Database schema (e.g., 'public')
+            table_name: Table name
+            filter_sql: SQL WHERE clause (without 'WHERE' keyword)
+            limit: Number of sample rows to return
+
+        Returns:
+            Dictionary with filtered_count and sample_data
+        """
+        from app.services.credential_service import credential_service
+        import psycopg2
+        import psycopg2.extras
+
+        # Get decrypted credentials
+        cred_data = credential_service.get_decrypted_credentials(user_id, credential_id)
+        if not cred_data:
+            raise ValueError(f"Credential {credential_id} not found")
+
+        credentials = cred_data['credentials']
+
+        try:
+            conn = psycopg2.connect(
+                host=credentials.get('host'),
+                port=credentials.get('port', 5432),
+                database=credentials.get('database'),
+                user=credentials.get('username'),
+                password=credentials.get('password'),
+                connect_timeout=10
+            )
+
+            # Get filtered count
+            count_query = f"""
+                SELECT COUNT(*)
+                FROM "{schema_name}"."{table_name}"
+                WHERE {filter_sql}
+            """
+            cursor = conn.cursor()
+            cursor.execute(count_query)
+            filtered_count = cursor.fetchone()[0]
+            cursor.close()
+
+            # Get sample data (use RealDictCursor for dict results)
+            sample_query = f"""
+                SELECT *
+                FROM "{schema_name}"."{table_name}"
+                WHERE {filter_sql}
+                LIMIT {limit}
+            """
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cursor.execute(sample_query)
+            sample_data = [dict(row) for row in cursor.fetchall()]
+            cursor.close()
+
+            # Convert non-JSON-serializable types
+            for row in sample_data:
+                for key, value in row.items():
+                    if hasattr(value, 'isoformat'):  # datetime objects
+                        row[key] = value.isoformat()
+                    elif isinstance(value, (bytes, bytearray)):
+                        row[key] = value.decode('utf-8', errors='replace')
+
+            conn.close()
+
+            print(f"[FILTER_PREVIEW] Filter '{filter_sql}' matches {filtered_count} rows")
+
+            return {
+                'filtered_count': filtered_count,
+                'sample_data': sample_data
+            }
+
+        except Exception as e:
+            print(f"[FILTER_PREVIEW] Error: {str(e)}")
+            # Return zeros on error but don't fail
+            return {
+                'filtered_count': 0,
+                'sample_data': [],
+                'error': str(e)
+            }
+
+
 # Singleton instance
 schema_discovery_service = SchemaDiscoveryService()

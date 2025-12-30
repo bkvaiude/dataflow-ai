@@ -18,6 +18,7 @@ from app.services.db_service import db_service
 from app.services.alert_service import alert_service
 from app.services.conversation_context import get_context
 from app.services.filter_generator import filter_generator
+from app.services.cost_estimator import cost_estimator
 
 
 class ConfirmationHandlers:
@@ -349,6 +350,29 @@ class ConfirmationHandlers:
 
                     print(f"[FILTER_FLOW] Generated filter: {filter_config.sql_where}")
 
+                    # Get filter preview (filtered count and sample data)
+                    filtered_count = 0
+                    sample_data = []
+                    try:
+                        # Parse table name to get schema and table
+                        table_parts = selected_tables[0].split('.')
+                        schema_name = table_parts[0] if len(table_parts) > 1 else 'public'
+                        table_only = table_parts[-1]
+
+                        preview_result = schema_discovery_service.get_filter_preview(
+                            user_id=user_id,
+                            credential_id=credential_id,
+                            schema_name=schema_name,
+                            table_name=table_only,
+                            filter_sql=filter_config.sql_where,
+                            limit=5
+                        )
+                        filtered_count = preview_result.get('filtered_count', 0)
+                        sample_data = preview_result.get('sample_data', [])
+                        print(f"[FILTER_FLOW] Preview: {filtered_count} rows match filter")
+                    except Exception as preview_err:
+                        print(f"[FILTER_FLOW] Preview error (non-fatal): {preview_err}")
+
                     # Return filter confirmation action
                     return {
                         'message': f"Great! You've selected {len(selected_tables)} table(s). I detected your filter requirement: \"{filter_requirement}\"",
@@ -365,6 +389,8 @@ class ConfirmationHandlers:
                                 'filterDescription': filter_requirement,
                                 'confidence': filter_config.confidence,
                                 'originalRowCount': table_row_count,
+                                'filteredRowCount': filtered_count,
+                                'sampleData': sample_data,
                                 'tableColumns': table_columns,
                                 'sessionId': session_id
                             }
@@ -571,11 +597,14 @@ class ConfirmationHandlers:
         """
         Process cost estimation confirmation.
 
-        After cost is acknowledged, proceed to final confirmation.
+        After cost is acknowledged, proceed to topic registry confirmation.
         """
         if data.get('cancelled'):
+            session_id = data.get('sessionId')
+            if session_id:
+                self._clear_session(session_id)
             return {
-                'message': "Cost estimate review cancelled. You can review costs anytime from the pipeline page.",
+                'message': "Pipeline setup cancelled. Let me know if you'd like to start over.",
                 'actions': []
             }
 
@@ -587,9 +616,32 @@ class ConfirmationHandlers:
         session['estimated_cost'] = data.get('estimated_cost', data.get('estimatedCost', {}))
         session['steps_completed'].append('cost')
 
+        # Get stored values from session to proceed to topic registry
+        credential_id = session.get('credential_id')
+        selected_tables = session.get('selected_tables', [])
+        clickhouse_config = session.get('clickhouse_config', {})
+        approved_schema = session.get('approved_schema', {})
+        topic_name = session.get('topic_name', '')
+        avro_schema = session.get('avro_schema', {})
+        schema_registry_subject = session.get('schema_registry_subject', '')
+
+        # Return topic registry confirmation
         return {
-            'message': "Cost estimate acknowledged. Ready for final pipeline creation.",
-            'actions': []
+            'message': f"Cost estimate confirmed. Here's how the data will flow from Kafka to ClickHouse:",
+            'actions': [{
+                'type': 'confirm_topic_registry',
+                'label': 'Review Data Flow',
+                'topicContext': {
+                    'credentialId': credential_id,
+                    'selectedTables': selected_tables,
+                    'clickhouseConfig': clickhouse_config,
+                    'approvedSchema': approved_schema,
+                    'topicName': topic_name,
+                    'avroSchema': avro_schema,
+                    'schemaRegistrySubject': schema_registry_subject,
+                    'sessionId': session_id
+                }
+            }]
         }
 
     async def handle_resources_confirmation(
@@ -1067,7 +1119,87 @@ class ConfirmationHandlers:
         session['avro_schema'] = avro_schema
         session['schema_registry_subject'] = schema_registry_subject
 
-        # Return topic registry confirmation with correct structure
+        # Calculate cost estimation
+        try:
+            # Get table info for cost estimation
+            tables_info = []
+            for table_name in selected_tables:
+                tables_info.append({
+                    'table_name': table_name,
+                    'estimated_row_count': session.get('filtered_row_count', 10000),  # Use filtered count if available
+                    'columns': approved_schema.get('columns', []) if approved_schema else []
+                })
+
+            # Calculate filter reduction if filter was applied
+            filter_reduction = 0
+            has_filter = session.get('filter_applied', False)
+            if has_filter:
+                original_count = session.get('original_row_count', 0)
+                filtered_count = session.get('filtered_row_count', 0)
+                if original_count > 0:
+                    filter_reduction = ((original_count - filtered_count) / original_count) * 100
+
+            # Get cost estimate
+            cost_estimate = cost_estimator.estimate_from_tables(
+                tables=tables_info,
+                sink_type='clickhouse',
+                has_filter=has_filter,
+                filter_reduction_percent=filter_reduction
+            )
+
+            # Convert to frontend-compatible format
+            cost_components = []
+            for component in cost_estimate.components:
+                cost_components.append({
+                    'name': component.name,
+                    'description': component.description,
+                    'unitCost': component.unit_cost,
+                    'unit': component.unit,
+                    'quantity': component.quantity,
+                    'dailyCost': component.daily_cost,
+                    'monthlyCost': component.monthly_cost
+                })
+
+            # Store cost in session
+            session['cost_estimate'] = cost_estimate.to_dict()
+
+            # Return cost estimation confirmation
+            pipeline_name = f"{selected_tables[0].split('.')[-1].title()} to ClickHouse"
+
+            return {
+                'message': f"Great! Here's the estimated cost for your pipeline before we create it:",
+                'actions': [{
+                    'type': 'confirm_cost',
+                    'label': 'Review Costs',
+                    'costContext': {
+                        'pipelineName': pipeline_name,
+                        'components': cost_components,
+                        'totals': {
+                            'daily': round(cost_estimate.daily_total, 2),
+                            'monthly': round(cost_estimate.monthly_total, 2),
+                            'yearly': round(cost_estimate.yearly_total, 2)
+                        },
+                        'notes': cost_estimate.notes,
+                        'assumptions': {
+                            'tables': len(selected_tables),
+                            'estimatedEventsPerDay': cost_estimate.assumptions.get('estimated_events_per_day', 0),
+                            'effectiveEventsPerDay': cost_estimate.assumptions.get('effective_events_per_day', 0),
+                            'avgRowSizeBytes': cost_estimate.assumptions.get('avg_row_size_bytes', 500),
+                            'filterApplied': has_filter,
+                            'filterReductionPercent': filter_reduction if has_filter else 0,
+                            'aggregationApplied': False
+                        },
+                        'sessionId': session_id
+                    }
+                }]
+            }
+
+        except Exception as e:
+            print(f"[COST_ESTIMATION] Error calculating cost: {e}")
+            # Fall through to topic registry if cost estimation fails
+            pass
+
+        # Fallback: Return topic registry confirmation with correct structure
         return {
             'message': f"Perfect! Your schema looks good. Here's how the data will flow from Kafka to ClickHouse:",
             'actions': [{
