@@ -140,6 +140,9 @@ This initiates an interactive workflow:
 - list_alert_rules - List configured alert rules
 - test_alert - Send test alert notification
 
+### Troubleshooting Tools:
+- troubleshoot_pipeline - Diagnose issues with a pipeline (USE THIS when users report problems!)
+
 ## What Makes You Special
 You create enterprise-grade streaming infrastructure:
 
@@ -188,7 +191,32 @@ You: "Pipeline created successfully! Would you like to set up alerts?"
 - ALWAYS use start_alert_setup for new alert configurations
 - NEVER ask for passwords in chat - the secure form handles it
 - NEVER auto-execute without user confirmation on destructive actions
-- User feedback from UI forms comes back automatically - you don't need to poll"""
+- User feedback from UI forms comes back automatically - you don't need to poll
+
+## Troubleshooting
+
+When users report issues with their pipelines, ALWAYS use the troubleshoot_pipeline tool first!
+
+**Common phrases that indicate troubleshooting is needed:**
+- "My pipeline is not working"
+- "Why isn't data flowing?"
+- "I'm getting errors"
+- "Pipeline is stuck"
+- "No data appearing in ClickHouse"
+- "What's wrong with my pipeline?"
+- "Help, my CDC isn't syncing"
+
+**Example:**
+User: "My pipeline stopped working"
+You: Call troubleshoot_pipeline with the pipeline_id or pipeline_name
+→ Tool returns diagnosis with specific issues and fixes
+→ You explain the issues in plain language and guide user to fix them
+
+**When explaining errors, be helpful:**
+- Translate technical errors to plain language
+- Suggest specific actions to fix the problem
+- If the fix requires user action (like updating credentials), guide them step by step
+- If you can fix it automatically (like restarting), offer to do so"""
 
     async def process_message(self, message: str, user_id: str) -> Dict[str, Any]:
         """Process a chat message and return a response"""
@@ -292,10 +320,34 @@ You: "Pipeline created successfully! Would you like to set up alerts?"
             }
 
         except Exception as e:
+            error_str = str(e).lower()
             print(f"LangChain processing error: {e}")
             import traceback
             traceback.print_exc()
-            # Fall back to mock on error
+
+            # Provide helpful error messages for common issues
+            if 'rate limit' in error_str or 'quota' in error_str:
+                return {
+                    "content": "I'm experiencing high demand right now. Please wait a moment and try again.",
+                    "actions": []
+                }
+            elif 'api key' in error_str or 'authentication' in error_str:
+                return {
+                    "content": "There's a configuration issue with the AI service. Please contact support.",
+                    "actions": []
+                }
+            elif 'timeout' in error_str or 'connection' in error_str:
+                return {
+                    "content": "I'm having trouble connecting right now. Please try again in a few seconds.",
+                    "actions": []
+                }
+            elif 'json' in error_str or 'parse' in error_str:
+                return {
+                    "content": "I had trouble processing that response. Could you try rephrasing your request?",
+                    "actions": []
+                }
+
+            # Fall back to mock on other errors
             return await self._mock_process(message, history)
 
     async def _mock_process(self, message: str, history: List[Dict]) -> Dict[str, Any]:
@@ -491,9 +543,23 @@ How can I help you today?""",
                                 action[context_key] = context_data
                                 actions.append(action)
                                 return actions  # One confirmation at a time
-                except (json.JSONDecodeError, AttributeError) as e:
-                    print(f"Error parsing {action_type} action: {e}")
-                    pass
+                except (json.JSONDecodeError, AttributeError, TypeError) as e:
+                    print(f"[ACTION_PARSE] Error parsing {action_type} action: {e}")
+                    # Try alternative parsing strategies
+                    try:
+                        # Try finding JSON with regex pattern
+                        json_pattern = re.search(r'\{[^{}]*"action_type"\s*:\s*"' + action_type + r'"[^{}]*\}', content)
+                        if json_pattern:
+                            data = json.loads(json_pattern.group())
+                            if context_key in data:
+                                actions.append({
+                                    "type": action_type,
+                                    "label": action_type.replace('confirm_', '').replace('_', ' ').title(),
+                                    context_key: data[context_key]
+                                })
+                                return actions
+                    except Exception:
+                        pass
 
         # Check for confirm_reprocess action (legacy)
         if '"action_type": "confirm_reprocess"' in content or 'already processed' in content_lower:

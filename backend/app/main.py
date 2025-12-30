@@ -119,6 +119,18 @@ async def chat_message(sid, data):
                 response = await confirmation_handlers.handle_destination_confirmation(
                     confirmation, user_id
                 )
+            elif action_type == 'confirm_clickhouse_config':
+                response = await confirmation_handlers.handle_clickhouse_config(
+                    confirmation, user_id
+                )
+            elif action_type == 'confirm_schema_preview':
+                response = await confirmation_handlers.handle_schema_preview(
+                    confirmation, user_id
+                )
+            elif action_type == 'confirm_topic_registry':
+                response = await confirmation_handlers.handle_topic_registry_confirmation(
+                    confirmation, user_id
+                )
             elif action_type == 'confirm_pipeline_create':
                 response = await confirmation_handlers.handle_pipeline_confirmation(
                     confirmation, user_id

@@ -469,16 +469,17 @@ ORDER BY ({order_by_sql})"""
         except Exception as e:
             raise Exception(f"Insert failed: {str(e)}")
 
-    def list_tables(self) -> List[str]:
+    def list_tables(self, database: str = None) -> List[str]:
         """List all tables in the database"""
         client = self._get_client()
+        db = database or self.database
         if not client:
             return []
 
         try:
             result = client.query(f"""
                 SELECT name FROM system.tables
-                WHERE database = '{self.database}'
+                WHERE database = '{db}'
             """)
 
             return [row[0] for row in result.result_rows]
@@ -486,6 +487,49 @@ ORDER BY ({order_by_sql})"""
         except Exception as e:
             print(f"[CLICKHOUSE] Failed to list tables: {str(e)}")
             return []
+
+    def get_table_schema(self, database: str, table: str) -> List[Dict[str, Any]]:
+        """Get schema (columns) for a table"""
+        client = self._get_client()
+        if not client:
+            return []
+
+        try:
+            result = client.query(f"""
+                SELECT name, type, is_in_primary_key
+                FROM system.columns
+                WHERE database = '{database}' AND table = '{table}'
+                ORDER BY position
+            """)
+
+            return [
+                {
+                    'name': row[0],
+                    'type': row[1],
+                    'isPrimaryKey': row[2] == 1
+                }
+                for row in result.result_rows
+            ]
+
+        except Exception as e:
+            print(f"[CLICKHOUSE] Failed to get table schema: {str(e)}")
+            return []
+
+    def get_row_count(self, database: str, table: str) -> int:
+        """Get approximate row count for a table"""
+        client = self._get_client()
+        if not client:
+            return 0
+
+        try:
+            result = client.query(f"""
+                SELECT count() FROM {database}.{table}
+            """)
+            return result.result_rows[0][0] if result.result_rows else 0
+
+        except Exception as e:
+            print(f"[CLICKHOUSE] Failed to get row count: {str(e)}")
+            return 0
 
     def drop_table(self, table_name: str) -> bool:
         """Drop a table"""

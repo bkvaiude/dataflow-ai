@@ -28,7 +28,11 @@ export type ChatActionType =
   | 'confirm_tables'           // Multi-select tables
   | 'confirm_pipeline_create'  // Final pipeline confirmation
   | 'confirm_alert_config'     // Alert settings form
-  | 'confirm_action';          // Generic yes/no confirmation
+  | 'confirm_action'           // Generic yes/no confirmation
+  // ClickHouse sink configuration steps
+  | 'confirm_clickhouse_config'  // Step 1: ClickHouse DB/table selection
+  | 'confirm_schema_preview'     // Step 2: Schema preview and approval
+  | 'confirm_topic_registry';    // Step 3: Kafka topic and schema registry confirmation
 
 export interface ChatAction {
   type: ChatActionType;
@@ -50,6 +54,10 @@ export interface ChatAction {
   pipelineContext?: PipelineConfirmContext;
   alertContext?: AlertConfirmContext;
   actionContext?: GenericActionContext;
+  // ClickHouse sink configuration contexts
+  clickhouseContext?: ClickHouseConfigContext;
+  schemaContext?: SchemaPreviewContext;
+  topicContext?: TopicRegistryContext;
 }
 
 // ============================================================================
@@ -145,6 +153,76 @@ export interface GenericActionContext {
   cancelLabel: string;
   variant: 'default' | 'warning' | 'danger';
   metadata?: Record<string, unknown>;
+}
+
+// ============================================================================
+// ClickHouse Sink Configuration Contexts
+// ============================================================================
+
+// Context for ClickHouse database/table configuration (Step 1)
+export interface ClickHouseConfigContext {
+  credentialId: string;
+  selectedTables: string[];
+  sessionId: string;
+  existingTables: Array<{
+    database: string;
+    table: string;
+    columns: ColumnInfo[];
+    rowCount: number;
+  }>;
+  suggestedDatabase: string;
+  suggestedTable: string;
+}
+
+// Context for schema preview and approval (Step 2)
+export interface SchemaPreviewContext {
+  credentialId: string;
+  selectedTables: string[];
+  clickhouseConfig: {
+    database: string;
+    table: string;
+    createNew: boolean;
+  };
+  sourceSchema: ColumnInfo[];
+  generatedSchema?: {
+    columns: Array<{
+      name: string;
+      sourceType: string;
+      clickhouseType: string;
+      nullable: boolean;
+      isPrimaryKey: boolean;
+      description?: string;
+    }>;
+    engine: string;
+    orderBy: string[];
+    partitionBy?: string;
+    createTableSql?: string;
+  };
+  promptForIntent: boolean;
+  sessionId: string;
+}
+
+// Context for Kafka topic and schema registry confirmation (Step 3)
+export interface TopicRegistryContext {
+  credentialId: string;
+  selectedTables: string[];
+  clickhouseConfig: {
+    database: string;
+    table: string;
+  };
+  approvedSchema: SchemaPreviewContext['generatedSchema'];
+  topicName: string;
+  avroSchema: {
+    type: string;
+    name: string;
+    namespace: string;
+    fields: Array<{
+      name: string;
+      type: string | string[];
+    }>;
+  };
+  schemaRegistrySubject: string;
+  sessionId: string;
 }
 
 // Connector types

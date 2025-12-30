@@ -6,3 +6,7 @@ export { PipelineConfirmation } from './PipelineConfirmation';
 export { AlertConfigForm } from './AlertConfigForm';
 export { GenericConfirmation } from './GenericConfirmation';
 export { SourceSelector } from './SourceSelector';
+// ClickHouse sink configuration components
+export { ClickHouseConfigForm } from './ClickHouseConfigForm';
+export { SchemaPreviewForm } from './SchemaPreviewForm';
+export { TopicRegistryConfirmation } from './TopicRegistryConfirmation';

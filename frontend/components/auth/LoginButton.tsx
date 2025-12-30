@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/hooks/useAuth';
+import { trackLogin, trackCTAClick } from '@/lib/analytics';
 
 export function LoginButton() {
   const { signIn, isLoading } = useAuth();
@@ -10,8 +11,10 @@ export function LoginButton() {
 
   const handleSignIn = async () => {
     setIsSigningIn(true);
+    trackCTAClick('sign_in_google', 'landing_page');
     try {
       await signIn();
+      trackLogin('google');
     } catch (error) {
       console.error('Sign in error:', error);
     } finally {

@@ -310,7 +310,9 @@ class ConfirmationHandlers:
         """
         Process destination selection.
 
-        After destination is selected, returns pipeline confirmation action.
+        After destination is selected, routes to appropriate next step:
+        - ClickHouse: Route to ClickHouse config
+        - Kafka: Route to pipeline confirmation
         """
         if data.get('cancelled'):
             session_id = data.get('sessionId')
@@ -332,11 +334,54 @@ class ConfirmationHandlers:
         session['sink_type'] = destination
         session['steps_completed'].append('destination')
 
-        # Generate suggested pipeline name
+        # Route to ClickHouse config if destination is ClickHouse
+        if destination == 'clickhouse':
+            from app.config import settings
+            from app.services.clickhouse_service import clickhouse_service
+
+            # Fetch existing ClickHouse tables for user to select from
+            existing_tables = []
+            try:
+                tables = clickhouse_service.list_tables(settings.clickhouse_database)
+                for table_name in tables:
+                    try:
+                        schema = clickhouse_service.get_table_schema(settings.clickhouse_database, table_name)
+                        row_count = clickhouse_service.get_row_count(settings.clickhouse_database, table_name)
+                        existing_tables.append({
+                            'database': settings.clickhouse_database,
+                            'table': table_name,
+                            'columns': schema,
+                            'rowCount': row_count
+                        })
+                    except Exception:
+                        pass  # Skip tables we can't read
+            except Exception as e:
+                print(f"[CLICKHOUSE_CONFIG] Could not fetch existing tables: {e}")
+
+            # Generate suggested table name from source table
+            source_table = selected_tables[0].split('.')[-1] if selected_tables else 'events'
+            suggested_table = f"{source_table}_cdc"
+
+            return {
+                'message': "Great! Now let's configure ClickHouse as your analytics destination. Choose an existing table or create a new one:",
+                'actions': [{
+                    'type': 'confirm_clickhouse_config',
+                    'label': 'Configure ClickHouse',
+                    'clickhouseContext': {
+                        'credentialId': credential_id,
+                        'selectedTables': selected_tables,
+                        'sessionId': session_id,
+                        'existingTables': existing_tables,
+                        'suggestedDatabase': settings.clickhouse_database,
+                        'suggestedTable': suggested_table
+                    }
+                }]
+            }
+
+        # For Kafka destination, go directly to pipeline confirmation
         table_hint = selected_tables[0].split('.')[-1] if selected_tables else 'data'
         suggested_name = f"{table_hint.title()} CDC Pipeline"
 
-        # Return pipeline confirmation action
         return {
             'message': f"Excellent choice! Here's a summary of your pipeline configuration. Please review and confirm:",
             'actions': [{
@@ -537,6 +582,338 @@ class ConfirmationHandlers:
         except Exception as e:
             return {
                 'message': f"Failed to create alert: {str(e)}",
+                'actions': []
+            }
+
+    async def handle_clickhouse_config(
+        self,
+        data: Dict[str, Any],
+        user_id: str
+    ) -> Dict[str, Any]:
+        """
+        Process ClickHouse configuration (Step 1 of ClickHouse flow).
+
+        User selected database/table, now show schema preview.
+        """
+        if data.get('cancelled'):
+            session_id = data.get('sessionId')
+            if session_id:
+                self._clear_session(session_id)
+            return {
+                'message': "Pipeline setup cancelled. Let me know if you'd like to start over.",
+                'actions': []
+            }
+
+        session_id = data.get('sessionId', str(uuid.uuid4()))
+        session = self._get_session(session_id)
+
+        # Store ClickHouse config from frontend (database, table, createNew)
+        clickhouse_config = {
+            'database': data.get('database'),
+            'table': data.get('table'),
+            'createNew': data.get('createNew', True)
+        }
+        session['clickhouse_config'] = clickhouse_config
+        session['steps_completed'].append('clickhouse_config')
+
+        # Get source tables and schema information
+        credential_id = data.get('credentialId') or session.get('credential_id')
+        selected_tables = data.get('selectedTables') or session.get('selected_tables', [])
+
+        try:
+            # Get source table schemas for preview
+            from app.services.schema_discovery_service import schema_discovery_service
+
+            source_schema = []
+            for table_name in selected_tables:
+                schema_result = schema_discovery_service.discover(
+                    user_id=user_id,
+                    credential_id=credential_id,
+                    schema_filter='public',
+                    include_row_counts=False
+                )
+
+                # Find the specific table and extract columns
+                for table in schema_result.get('tables', []):
+                    full_name = f"{table.get('schema_name')}.{table.get('table_name')}"
+                    if full_name == table_name:
+                        for col in table.get('columns', []):
+                            source_schema.append({
+                                'name': col.get('column_name'),
+                                'type': col.get('data_type'),
+                                'nullable': col.get('is_nullable', True),
+                                'isPk': col.get('is_pk', False)
+                            })
+                        break
+
+            # Store source schema in session
+            session['source_schema'] = source_schema
+            session['credential_id'] = credential_id
+            session['selected_tables'] = selected_tables
+
+            # Return schema preview - user will describe intent, then we generate
+            return {
+                'message': "Great! Now describe your analytics goals so I can generate an optimized ClickHouse schema:",
+                'actions': [{
+                    'type': 'confirm_schema_preview',
+                    'label': 'Configure Schema',
+                    'schemaContext': {
+                        'credentialId': credential_id,
+                        'selectedTables': selected_tables,
+                        'sourceSchema': source_schema,
+                        'clickhouseConfig': clickhouse_config,
+                        'promptForIntent': True,  # Show intent textarea first
+                        'generatedSchema': None,  # Will be populated after user describes intent
+                        'sessionId': session_id
+                    }
+                }]
+            }
+
+        except Exception as e:
+            return {
+                'message': f"Failed to get source schema: {str(e)}",
+                'actions': []
+            }
+
+    async def handle_schema_preview(
+        self,
+        data: Dict[str, Any],
+        user_id: str
+    ) -> Dict[str, Any]:
+        """
+        Process schema preview confirmation.
+
+        After schema approval, show topic and schema registry confirmation.
+        """
+        if data.get('cancelled'):
+            session_id = data.get('sessionId')
+            if session_id:
+                self._clear_session(session_id)
+            return {
+                'message': "Pipeline setup cancelled. Let me know if you'd like to start over.",
+                'actions': []
+            }
+
+        session_id = data.get('sessionId', str(uuid.uuid4()))
+        session = self._get_session(session_id)
+
+        # Get approved schema from frontend (the generatedSchema that was approved)
+        approved_schema = data.get('approvedSchema', data.get('generatedSchema'))
+        session['approved_schema'] = approved_schema
+        session['steps_completed'].append('schema_approved')
+
+        # Get source tables and config
+        credential_id = session.get('credential_id')
+        selected_tables = session.get('selected_tables', [])
+        clickhouse_config = session.get('clickhouse_config', {})
+
+        # Build topic name (Debezium format: server_name.schema.table)
+        # Use placeholder that will be replaced during pipeline creation
+        table_name = selected_tables[0] if selected_tables else 'events'
+        parts = table_name.split('.')
+        schema = parts[0] if len(parts) > 1 else 'public'
+        table = parts[1] if len(parts) > 1 else parts[0]
+        topic_name = f"dataflow_pipeline.{schema}.{table}"
+
+        # Build Avro schema from approved ClickHouse schema
+        avro_fields = []
+        if approved_schema and approved_schema.get('columns'):
+            for col in approved_schema['columns']:
+                # Map ClickHouse types to Avro types
+                ch_type = col.get('type', 'String')
+                avro_type = self._clickhouse_to_avro_type(ch_type)
+
+                # Handle nullable types
+                if col.get('nullable', True):
+                    avro_fields.append({
+                        'name': col.get('name'),
+                        'type': ['null', avro_type]
+                    })
+                else:
+                    avro_fields.append({
+                        'name': col.get('name'),
+                        'type': avro_type
+                    })
+
+        avro_schema = {
+            'type': 'record',
+            'name': table,
+            'namespace': f"com.dataflow.{schema}",
+            'fields': avro_fields
+        }
+
+        schema_registry_subject = f"{topic_name}-value"
+
+        session['topic_name'] = topic_name
+        session['avro_schema'] = avro_schema
+        session['schema_registry_subject'] = schema_registry_subject
+
+        # Return topic registry confirmation with correct structure
+        return {
+            'message': f"Perfect! Your schema looks good. Here's how the data will flow from Kafka to ClickHouse:",
+            'actions': [{
+                'type': 'confirm_topic_registry',
+                'label': 'Review Data Flow',
+                'topicContext': {
+                    'credentialId': credential_id,
+                    'selectedTables': selected_tables,
+                    'clickhouseConfig': clickhouse_config,
+                    'approvedSchema': approved_schema,
+                    'topicName': topic_name,
+                    'avroSchema': avro_schema,
+                    'schemaRegistrySubject': schema_registry_subject,
+                    'sessionId': session_id
+                }
+            }]
+        }
+
+    def _clickhouse_to_avro_type(self, ch_type: str) -> str:
+        """Map ClickHouse types to Avro types"""
+        ch_type_lower = ch_type.lower()
+
+        if 'int' in ch_type_lower:
+            if '64' in ch_type_lower:
+                return 'long'
+            return 'int'
+        elif 'float' in ch_type_lower or 'double' in ch_type_lower or 'decimal' in ch_type_lower:
+            return 'double'
+        elif 'bool' in ch_type_lower:
+            return 'boolean'
+        elif 'date' in ch_type_lower or 'time' in ch_type_lower:
+            return 'string'  # Avro uses string for timestamps typically
+        else:
+            return 'string'
+
+    async def handle_topic_registry_confirmation(
+        self,
+        data: Dict[str, Any],
+        user_id: str
+    ) -> Dict[str, Any]:
+        """
+        Process topic registry confirmation.
+
+        Creates the complete pipeline with source connector, ClickHouse tables, and sink connector.
+        """
+        if data.get('cancelled'):
+            session_id = data.get('sessionId')
+            if session_id:
+                self._clear_session(session_id)
+            return {
+                'message': "Pipeline setup cancelled. Let me know if you'd like to start over.",
+                'actions': []
+            }
+
+        session_id = data.get('sessionId', str(uuid.uuid4()))
+        session = self._get_session(session_id)
+
+        try:
+            # Create pipeline record
+            db_session = db_service._get_session()
+            try:
+                # Generate pipeline name
+                selected_tables = session.get('selected_tables', [])
+                table_hint = selected_tables[0].split('.')[-1] if selected_tables else 'data'
+                pipeline_name = data.get('pipelineName', f"{table_hint.title()} to ClickHouse")
+
+                # Create pipeline with updated config structure
+                clickhouse_config = session.get('clickhouse_config', {})
+                approved_schema = session.get('approved_schema', {})
+
+                pipeline = Pipeline(
+                    id=str(uuid.uuid4()),
+                    user_id=user_id,
+                    name=pipeline_name,
+                    source_credential_id=session.get('credential_id'),
+                    source_tables=selected_tables,
+                    sink_type='clickhouse',
+                    sink_config={
+                        'clickhouse': clickhouse_config,
+                        'schema': approved_schema,
+                        'topic_name': session.get('topic_name'),
+                        'avro_schema': session.get('avro_schema'),
+                        'schema_registry_subject': session.get('schema_registry_subject')
+                    },
+                    status='pending'
+                )
+                db_session.add(pipeline)
+                db_session.commit()
+                db_session.refresh(pipeline)
+
+                print(f"[PIPELINE_CREATE] ClickHouse pipeline created: id={pipeline.id}")
+
+                # Store pipeline info in session
+                session['pipeline_id'] = pipeline.id
+                session['pipeline_name'] = pipeline.name
+                session['steps_completed'].append('pipeline_created')
+
+                # Offer alert setup (same as regular pipeline confirmation)
+                return {
+                    'message': f"Pipeline '{pipeline.name}' created successfully! Would you like to set up monitoring alerts for this pipeline?",
+                    'actions': [{
+                        'type': 'confirm_alert_config',
+                        'label': 'Configure Alerts',
+                        'alertContext': {
+                            'pipelineId': pipeline.id,
+                            'pipelineName': pipeline.name,
+                            'suggestedName': f"{pipeline.name} Monitor",
+                            'ruleTypes': [
+                                {
+                                    'type': 'gap_detection',
+                                    'name': 'Gap Detection',
+                                    'description': 'Alert when no events are received for a period',
+                                    'recommended': True
+                                },
+                                {
+                                    'type': 'volume_spike',
+                                    'name': 'Volume Spike',
+                                    'description': 'Alert when event volume exceeds baseline',
+                                    'recommended': False
+                                },
+                                {
+                                    'type': 'volume_drop',
+                                    'name': 'Volume Drop',
+                                    'description': 'Alert when event volume drops significantly',
+                                    'recommended': False
+                                },
+                                {
+                                    'type': 'null_ratio',
+                                    'name': 'NULL Ratio',
+                                    'description': 'Alert when NULL values exceed threshold',
+                                    'recommended': False
+                                }
+                            ],
+                            'defaultConfig': {
+                                'severity': 'warning',
+                                'enabledDays': [0, 1, 2, 3, 4],
+                                'enabledHours': {'start': 9, 'end': 17},
+                                'cooldownMinutes': 30
+                            },
+                            'sessionId': session_id
+                        }
+                    }, {
+                        'type': 'confirm_action',
+                        'label': 'Skip Alerts',
+                        'actionContext': {
+                            'actionId': 'skip_alerts',
+                            'title': 'Skip Alert Setup',
+                            'description': 'You can always configure alerts later from the pipeline details page.',
+                            'confirmLabel': 'Skip',
+                            'cancelLabel': 'Go Back',
+                            'variant': 'default',
+                            'metadata': {'pipelineId': pipeline.id}
+                        }
+                    }]
+                }
+
+            except Exception as e:
+                db_session.rollback()
+                raise e
+            finally:
+                db_session.close()
+
+        except Exception as e:
+            return {
+                'message': f"Failed to create pipeline: {str(e)}",
                 'actions': []
             }
 

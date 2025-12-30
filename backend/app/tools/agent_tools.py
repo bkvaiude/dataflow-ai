@@ -1834,6 +1834,228 @@ def test_alert(rule_id: str) -> str:
 
 
 @tool
+def generate_clickhouse_schema(
+    source_columns: str,
+    analytics_intent: str = "Real-time analytics and reporting",
+    table_name: str = "analytics_table"
+) -> str:
+    """
+    Generate optimized ClickHouse table schema from source PostgreSQL columns.
+
+    Use this tool when the user wants to create a ClickHouse destination for their CDC pipeline.
+    This analyzes source columns and generates an optimized schema with:
+    - ReplacingMergeTree engine for CDC upserts
+    - Proper type mappings from PostgreSQL to ClickHouse
+    - CDC metadata columns (_deleted, _version, _inserted_at)
+    - Optimized ORDER BY based on primary keys
+    - Analytics-optimized column types based on intent
+
+    Args:
+        source_columns: JSON string of source columns with metadata:
+            '[{"name": "id", "type": "integer", "is_primary_key": true}, ...]'
+        analytics_intent: Description of analytics use case (e.g., "Time-series analysis", "User behavior tracking")
+        table_name: Name for the ClickHouse table (default: "analytics_table")
+
+    Returns:
+        JSON with optimized ClickHouse schema, CREATE TABLE SQL, and recommendations
+    """
+    result = generate_clickhouse_schema_internal(
+        source_columns=json.loads(source_columns) if isinstance(source_columns, str) else source_columns,
+        analytics_intent=analytics_intent,
+        table_name=table_name
+    )
+    return json.dumps(result, indent=2)
+
+
+def generate_clickhouse_schema_internal(
+    source_columns: List[Dict[str, Any]],
+    analytics_intent: str,
+    table_name: str
+) -> Dict[str, Any]:
+    """
+    Internal function to generate ClickHouse schema.
+    Called by both the tool and confirmation handlers.
+    """
+    from app.config import settings
+    from app.services.clickhouse_service import PG_TO_CLICKHOUSE_TYPES
+
+    # Try to use Gemini for intelligent schema generation
+    if settings.has_gemini_api_key:
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=settings.gemini_api_key)
+            model = genai.GenerativeModel('gemini-1.5-flash')
+
+            # Build prompt for Gemini
+            columns_desc = "\n".join([
+                f"- {col['name']}: {col.get('type', 'unknown')} {'(PRIMARY KEY)' if col.get('is_primary_key') else ''}"
+                for col in source_columns
+            ])
+
+            prompt = f"""You are a ClickHouse database expert. Generate an optimized schema for real-time CDC analytics.
+
+Source PostgreSQL table: {table_name}
+Columns:
+{columns_desc}
+
+Analytics Intent: {analytics_intent}
+
+Requirements:
+1. Use ReplacingMergeTree(_version) engine for CDC updates
+2. Map PostgreSQL types to optimal ClickHouse types
+3. Add CDC metadata columns: _deleted (UInt8), _version (UInt64), _inserted_at (DateTime64(3))
+4. Choose ORDER BY based on primary keys and analytics use case
+5. Use PARTITION BY if time-series data is detected
+6. Suggest indexes if needed for analytics queries
+
+Return ONLY a JSON object with this structure:
+{{
+  "clickhouse_table": "table_name",
+  "columns": [
+    {{"name": "column_name", "type": "ClickHouse_type", "nullable": true/false}}
+  ],
+  "engine": "ReplacingMergeTree(_version)",
+  "order_by": ["column1", "column2"],
+  "partition_by": "toYYYYMM(date_column)" or null,
+  "recommendations": ["optimization tip 1", "tip 2"]
+}}"""
+
+            response = model.generate_content(prompt)
+            gemini_result = response.text
+
+            # Extract JSON from response (Gemini might wrap it in markdown)
+            if "```json" in gemini_result:
+                gemini_result = gemini_result.split("```json")[1].split("```")[0].strip()
+            elif "```" in gemini_result:
+                gemini_result = gemini_result.split("```")[1].split("```")[0].strip()
+
+            schema = json.loads(gemini_result)
+
+            # Generate CREATE TABLE SQL
+            create_sql = _generate_create_table_sql(schema)
+            schema['create_sql'] = create_sql
+            schema['source_table'] = table_name
+            schema['generated_by'] = 'gemini'
+
+            return schema
+
+        except Exception as e:
+            print(f"[SCHEMA_GEN] Gemini failed, using fallback: {str(e)}")
+            # Fall through to fallback
+
+    # Fallback: Use deterministic schema generation
+    return _generate_fallback_schema(source_columns, table_name, analytics_intent)
+
+
+def _generate_fallback_schema(
+    source_columns: List[Dict[str, Any]],
+    table_name: str,
+    analytics_intent: str
+) -> Dict[str, Any]:
+    """
+    Fallback schema generation without Gemini.
+    Uses PostgreSQL to ClickHouse type mapping.
+    """
+    from app.services.clickhouse_service import PG_TO_CLICKHOUSE_TYPES
+
+    clickhouse_columns = []
+    primary_keys = []
+
+    # Map PostgreSQL columns to ClickHouse
+    for col in source_columns:
+        pg_type = col.get('type', 'text').lower()
+        ch_type = PG_TO_CLICKHOUSE_TYPES.get(pg_type, 'String')
+
+        # Handle nullable columns
+        nullable = col.get('nullable', True) and not col.get('is_primary_key', False)
+
+        clickhouse_columns.append({
+            'name': col['name'],
+            'type': ch_type,
+            'nullable': nullable
+        })
+
+        if col.get('is_primary_key'):
+            primary_keys.append(col['name'])
+
+    # Add CDC metadata columns
+    clickhouse_columns.extend([
+        {'name': '_deleted', 'type': 'UInt8', 'nullable': False},
+        {'name': '_version', 'type': 'UInt64', 'nullable': False},
+        {'name': '_inserted_at', 'type': 'DateTime64(3)', 'nullable': False}
+    ])
+
+    # Determine ORDER BY
+    order_by = primary_keys if primary_keys else [source_columns[0]['name']]
+
+    # Detect time-series for PARTITION BY
+    partition_by = None
+    for col in source_columns:
+        col_type = col.get('type', '').lower()
+        if 'timestamp' in col_type or 'date' in col_type:
+            if 'created' in col['name'].lower() or 'date' in col['name'].lower():
+                partition_by = f"toYYYYMM({col['name']})"
+                break
+
+    # Generate recommendations
+    recommendations = []
+    if partition_by:
+        recommendations.append(f"Partitioning by month for time-series optimization")
+    if len(primary_keys) > 1:
+        recommendations.append(f"Composite primary key detected - ORDER BY optimized for joins")
+    if 'analytics' in analytics_intent.lower() or 'reporting' in analytics_intent.lower():
+        recommendations.append("Consider adding aggregating materialized views for common queries")
+
+    schema = {
+        'clickhouse_table': table_name.split('.')[-1],
+        'source_table': table_name,
+        'columns': clickhouse_columns,
+        'engine': 'ReplacingMergeTree(_version)',
+        'order_by': order_by,
+        'partition_by': partition_by,
+        'recommendations': recommendations,
+        'generated_by': 'fallback'
+    }
+
+    # Generate CREATE TABLE SQL
+    schema['create_sql'] = _generate_create_table_sql(schema)
+
+    return schema
+
+
+def _generate_create_table_sql(schema: Dict[str, Any]) -> str:
+    """Generate CREATE TABLE SQL from schema definition"""
+    table_name = schema['clickhouse_table']
+    columns = schema['columns']
+    engine = schema.get('engine', 'ReplacingMergeTree(_version)')
+    order_by = schema.get('order_by', [])
+    partition_by = schema.get('partition_by')
+
+    # Build column definitions
+    col_defs = []
+    for col in columns:
+        ch_type = col['type']
+        if col.get('nullable', False):
+            ch_type = f"Nullable({ch_type})"
+        col_defs.append(f"    `{col['name']}` {ch_type}")
+
+    columns_sql = ",\n".join(col_defs)
+    order_by_sql = ", ".join(f"`{c}`" for c in order_by)
+
+    sql = f"""CREATE TABLE IF NOT EXISTS {table_name} (
+{columns_sql}
+)
+ENGINE = {engine}"""
+
+    if partition_by:
+        sql += f"\nPARTITION BY {partition_by}"
+
+    sql += f"\nORDER BY ({order_by_sql})"
+
+    return sql
+
+
+@tool
 def generate_dashboard(use_real_data: bool = True) -> str:
     """Generate a Google Sheets dashboard from processed Kafka data.
 
@@ -2046,6 +2268,288 @@ def start_alert_setup(
         session.close()
 
 
+@tool
+def troubleshoot_pipeline(
+    pipeline_id: str = "",
+    pipeline_name: str = ""
+) -> str:
+    """
+    Diagnose issues with a CDC pipeline and provide suggested fixes.
+
+    Use this tool when:
+    - A user says their pipeline is not working
+    - A user asks why data isn't flowing
+    - A user reports errors or issues with their pipeline
+    - A user wants to check what's wrong with their pipeline
+
+    This tool performs comprehensive diagnostics:
+    1. Checks source connector status (Debezium)
+    2. Checks sink connector status (ClickHouse/Kafka)
+    3. Analyzes recent error events
+    4. Checks lag and throughput
+    5. Provides specific fix suggestions based on detected issues
+
+    Args:
+        pipeline_id: ID of the pipeline to troubleshoot
+        pipeline_name: Name of the pipeline (alternative to ID)
+
+    Returns:
+        JSON with diagnosis, issues found, and recommended fixes
+    """
+    from app.db.models import Pipeline, PipelineEvent
+    from app.services.db_service import db_service
+    from app.services.pipeline_monitor import pipeline_monitor
+    from app.services.confluent_connector_service import confluent_connector_service
+
+    user_id = get_user_context()
+
+    try:
+        session = db_service._get_session()
+        try:
+            # Find pipeline
+            if pipeline_name and not pipeline_id:
+                pipeline = session.query(Pipeline).filter(
+                    Pipeline.user_id == user_id,
+                    Pipeline.name == pipeline_name
+                ).first()
+            else:
+                pipeline = session.query(Pipeline).filter(
+                    Pipeline.id == pipeline_id,
+                    Pipeline.user_id == user_id
+                ).first()
+
+            if not pipeline:
+                return json.dumps({
+                    "status": "error",
+                    "message": "Pipeline not found. Please provide a valid pipeline ID or name.",
+                    "suggestion": "Use list_cdc_pipelines to see all your pipelines."
+                }, indent=2)
+
+            # Initialize diagnosis
+            issues = []
+            fixes = []
+            severity = "healthy"  # healthy, warning, critical
+
+            # 1. Check pipeline status
+            if pipeline.status == "stopped":
+                issues.append({
+                    "component": "pipeline",
+                    "issue": "Pipeline is stopped",
+                    "severity": "info"
+                })
+                fixes.append({
+                    "action": "Start the pipeline",
+                    "command": f"Use start_cdc_pipeline with pipeline_id='{pipeline.id}'",
+                    "priority": 1
+                })
+                severity = "warning"
+            elif pipeline.status == "pending":
+                issues.append({
+                    "component": "pipeline",
+                    "issue": "Pipeline was created but never started",
+                    "severity": "warning"
+                })
+                fixes.append({
+                    "action": "Start the pipeline to begin streaming",
+                    "command": f"Use start_cdc_pipeline with pipeline_id='{pipeline.id}'",
+                    "priority": 1
+                })
+                severity = "warning"
+
+            # 2. Check source connector
+            source_connector_healthy = False
+            if pipeline.source_connector_name:
+                try:
+                    source_status = confluent_connector_service.get_connector_status(
+                        pipeline.source_connector_name
+                    )
+                    connector_state = source_status.get('connector', {}).get('state', 'UNKNOWN')
+
+                    if connector_state == 'RUNNING':
+                        source_connector_healthy = True
+                    elif connector_state == 'FAILED':
+                        trace = source_status.get('connector', {}).get('trace', '')
+                        issues.append({
+                            "component": "source_connector",
+                            "issue": f"Source connector is FAILED",
+                            "details": trace[:500] if trace else "No error trace available",
+                            "severity": "critical"
+                        })
+                        severity = "critical"
+
+                        # Analyze error and suggest fix
+                        if 'Connection refused' in trace or 'Unable to connect' in trace:
+                            fixes.append({
+                                "action": "Check database connection",
+                                "details": "Verify the source database is running and accessible. Check host, port, and firewall rules.",
+                                "priority": 1
+                            })
+                        elif 'password authentication failed' in trace:
+                            fixes.append({
+                                "action": "Check database credentials",
+                                "details": "The username or password is incorrect. Update the stored credentials.",
+                                "priority": 1
+                            })
+                        elif 'replication slot' in trace.lower():
+                            fixes.append({
+                                "action": "Check replication slot",
+                                "details": "The replication slot may be in use or missing. Try restarting the connector or recreating it.",
+                                "priority": 1
+                            })
+                        elif 'wal_level' in trace.lower():
+                            fixes.append({
+                                "action": "Enable logical replication",
+                                "details": "Set wal_level=logical in postgresql.conf and restart PostgreSQL.",
+                                "priority": 1
+                            })
+                        else:
+                            fixes.append({
+                                "action": "Restart the connector",
+                                "details": "Try stopping and restarting the pipeline to recover from transient errors.",
+                                "priority": 2
+                            })
+                    elif connector_state == 'PAUSED':
+                        issues.append({
+                            "component": "source_connector",
+                            "issue": "Source connector is PAUSED",
+                            "severity": "warning"
+                        })
+                        fixes.append({
+                            "action": "Resume the connector",
+                            "command": f"Use control_cdc_pipeline with action='resume'",
+                            "priority": 1
+                        })
+                        if severity != "critical":
+                            severity = "warning"
+                    else:
+                        issues.append({
+                            "component": "source_connector",
+                            "issue": f"Source connector state is {connector_state}",
+                            "severity": "warning"
+                        })
+                except Exception as e:
+                    issues.append({
+                        "component": "source_connector",
+                        "issue": f"Cannot reach Confluent Cloud: {str(e)}",
+                        "severity": "warning"
+                    })
+                    fixes.append({
+                        "action": "Check Confluent Cloud connectivity",
+                        "details": "Verify CONFLUENT_CLOUD_API_KEY and CONFLUENT_CLOUD_API_SECRET are set correctly.",
+                        "priority": 1
+                    })
+            else:
+                if pipeline.status == "running":
+                    issues.append({
+                        "component": "source_connector",
+                        "issue": "No source connector configured but pipeline is marked as running",
+                        "severity": "critical"
+                    })
+                    severity = "critical"
+
+            # 3. Check sink connector
+            sink_connector_healthy = False
+            if pipeline.sink_connector_name:
+                try:
+                    sink_status = confluent_connector_service.get_connector_status(
+                        pipeline.sink_connector_name
+                    )
+                    connector_state = sink_status.get('connector', {}).get('state', 'UNKNOWN')
+
+                    if connector_state == 'RUNNING':
+                        sink_connector_healthy = True
+                    elif connector_state == 'FAILED':
+                        trace = sink_status.get('connector', {}).get('trace', '')
+                        issues.append({
+                            "component": "sink_connector",
+                            "issue": "Sink connector is FAILED",
+                            "details": trace[:500] if trace else "No error trace available",
+                            "severity": "critical"
+                        })
+                        severity = "critical"
+
+                        if 'ClickHouse' in trace or 'clickhouse' in trace.lower():
+                            fixes.append({
+                                "action": "Check ClickHouse connection",
+                                "details": "Verify ClickHouse is running and the destination table exists with correct schema.",
+                                "priority": 1
+                            })
+                        elif 'schema' in trace.lower() or 'type' in trace.lower():
+                            fixes.append({
+                                "action": "Check schema compatibility",
+                                "details": "The source and sink schemas may be incompatible. Verify column types match.",
+                                "priority": 1
+                            })
+                except Exception as e:
+                    issues.append({
+                        "component": "sink_connector",
+                        "issue": f"Cannot check sink status: {str(e)}",
+                        "severity": "warning"
+                    })
+
+            # 4. Check recent error events
+            recent_events = session.query(PipelineEvent).filter(
+                PipelineEvent.pipeline_id == pipeline.id,
+                PipelineEvent.event_type == 'error'
+            ).order_by(PipelineEvent.created_at.desc()).limit(5).all()
+
+            if recent_events:
+                for event in recent_events:
+                    issues.append({
+                        "component": "pipeline_event",
+                        "issue": event.message,
+                        "timestamp": event.created_at.isoformat() if event.created_at else None,
+                        "severity": "warning"
+                    })
+                if severity == "healthy":
+                    severity = "warning"
+
+            # 5. Build diagnosis summary
+            if not issues:
+                diagnosis = "Pipeline appears healthy. All components are functioning normally."
+                if pipeline.status == "running" and source_connector_healthy:
+                    diagnosis += " Data should be flowing from source to destination."
+            else:
+                critical_count = len([i for i in issues if i.get('severity') == 'critical'])
+                warning_count = len([i for i in issues if i.get('severity') == 'warning'])
+
+                if critical_count > 0:
+                    diagnosis = f"Found {critical_count} critical issue(s) and {warning_count} warning(s). The pipeline requires immediate attention."
+                else:
+                    diagnosis = f"Found {warning_count} warning(s). The pipeline may not be operating at full capacity."
+
+            # Sort fixes by priority
+            fixes.sort(key=lambda x: x.get('priority', 99))
+
+            response = {
+                "status": "success",
+                "pipeline_id": pipeline.id,
+                "pipeline_name": pipeline.name,
+                "pipeline_status": pipeline.status,
+                "severity": severity,
+                "diagnosis": diagnosis,
+                "issues": issues,
+                "recommended_fixes": fixes[:5],  # Top 5 fixes
+                "source_connector": pipeline.source_connector_name,
+                "sink_connector": pipeline.sink_connector_name,
+                "tables": pipeline.source_tables,
+                "started_at": pipeline.started_at.isoformat() if pipeline.started_at else None,
+                "last_health_check": pipeline.last_health_check.isoformat() if pipeline.last_health_check else None
+            }
+
+            return json.dumps(response, indent=2)
+
+        finally:
+            session.close()
+
+    except Exception as e:
+        return json.dumps({
+            "status": "error",
+            "message": f"Troubleshooting failed: {str(e)}",
+            "suggestion": "Check that the pipeline exists and you have permission to access it."
+        }, indent=2)
+
+
 def get_all_tools() -> list:
     """Get all LangChain tools for the agent."""
     return [
@@ -2065,6 +2569,7 @@ def get_all_tools() -> list:
         discover_schema,
         check_cdc_readiness,
         preview_sample_data,
+        generate_clickhouse_schema,  # ClickHouse schema generation
 
         # Phase 3: CDC Pipeline tools
         create_cdc_pipeline,
@@ -2084,7 +2589,10 @@ def get_all_tools() -> list:
         create_anomaly_template,
         create_alert_rule,
         list_alert_rules,
-        test_alert
+        test_alert,
+
+        # Phase 7: Troubleshooting tools
+        troubleshoot_pipeline
     ]
 
 

@@ -253,7 +253,17 @@ async def get_current_user(
                     "picture": user.get("picture"),
                 }
 
-    # Fallback to legacy session authentication
+        # JWT verification failed - try token as session ID (for backward compatibility)
+        user_data = get_session(token)
+        if user_data:
+            return {
+                "id": user_data.get("id"),
+                "email": user_data.get("email"),
+                "name": user_data.get("name"),
+                "picture": user_data.get("picture"),
+            }
+
+    # Fallback to legacy session authentication via query param
     if not session:
         raise HTTPException(status_code=401, detail="Not authenticated")
 

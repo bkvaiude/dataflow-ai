@@ -42,13 +42,18 @@ async def get_current_user_id(
             if user_id:
                 return user_id
 
-        # Token exists but is invalid/expired
+        # JWT verification failed - try token as session ID (for backward compatibility)
+        user_data = get_session(token)
+        if user_data and user_data.get("id"):
+            return user_data["id"]
+
+        # Token exists but is invalid
         raise HTTPException(
             status_code=401,
             detail="Invalid or expired access token"
         )
 
-    # Fallback to legacy session authentication
+    # Fallback to legacy session authentication via query param
     if session:
         user_data = get_session(session)
         if user_data and user_data.get("id"):

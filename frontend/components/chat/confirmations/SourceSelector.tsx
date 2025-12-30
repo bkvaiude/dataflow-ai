@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Database, Server, Plus, Loader2, CheckCircle, ExternalLink, RefreshCw } from 'lucide-react';
-import { getIdToken } from '@/lib/firebase';
+import { getIdToken, getAccessToken, getSession } from '@/lib/firebase';
 
 interface SourceCredential {
   id: string;
@@ -47,12 +47,22 @@ export function SourceSelector({ context, onSelect, onCreateNew, onCancel }: Sou
     setError(null);
 
     try {
-      const token = await getIdToken();
-      const response = await fetch(`${API_URL}/api/credentials/`, {
-        headers: {
-          ...(token && { 'Authorization': `Bearer ${token}` }),
-        },
-      });
+      // Check for JWT access token first, then fallback to session
+      const accessToken = getAccessToken();
+      const session = getSession();
+
+      let url = `${API_URL}/api/credentials/`;
+      const headers: Record<string, string> = {};
+
+      if (accessToken) {
+        // Use JWT Bearer token
+        headers['Authorization'] = `Bearer ${accessToken}`;
+      } else if (session) {
+        // Use session as query parameter
+        url += `?session=${encodeURIComponent(session)}`;
+      }
+
+      const response = await fetch(url, { headers });
 
       if (!response.ok) {
         throw new Error('Failed to fetch credentials');

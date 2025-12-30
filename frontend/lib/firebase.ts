@@ -9,6 +9,7 @@ const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000; // 5 minutes
 const ACCESS_TOKEN_EXPIRE_MS = 60 * 60 * 1000; // 1 hour
 
 let refreshTimer: NodeJS.Timeout | null = null;
+let refreshPromise: Promise<boolean> | null = null;
 
 // Sign in with Google via backend OAuth
 export const signInWithGoogle = async (): Promise<User> => {
@@ -101,8 +102,22 @@ function isTokenExpiringSoon(): boolean {
   return (expiryTime - now) < TOKEN_REFRESH_BUFFER_MS;
 }
 
-// Refresh the access token using refresh token
+// Refresh the access token using refresh token (with mutex to prevent concurrent refreshes)
 async function refreshAccessToken(): Promise<boolean> {
+  // If a refresh is already in progress, wait for it
+  if (refreshPromise) {
+    return refreshPromise;
+  }
+
+  refreshPromise = doRefreshAccessToken();
+  try {
+    return await refreshPromise;
+  } finally {
+    refreshPromise = null;
+  }
+}
+
+async function doRefreshAccessToken(): Promise<boolean> {
   try {
     const refreshToken = getRefreshToken();
     if (!refreshToken) {
@@ -182,7 +197,8 @@ export const checkAuthStatus = async (): Promise<User | null> => {
       if (refreshed) {
         accessToken = getAccessToken();
       } else {
-        return null;
+        // Refresh failed - clear access token and try session auth
+        accessToken = null;
       }
     }
 
@@ -208,6 +224,7 @@ export const checkAuthStatus = async (): Promise<User | null> => {
       if (refreshed) {
         return checkAuthStatus(); // Retry with new token
       }
+      // Refresh failed - fall through to session auth
     }
 
     // Fallback to legacy session authentication
@@ -274,6 +291,9 @@ export const getIdToken = async (): Promise<string | null> => {
 
 // Export token storage function for auth callback page
 export { storeTokens };
+
+// Export auth helper functions for components that need fine-grained control
+export { getAccessToken, getSession };
 
 // For backward compatibility
 export const auth = null;

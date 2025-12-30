@@ -417,6 +417,7 @@ async def start_pipeline(
     from app.db.models import Pipeline
     from app.services.confluent_connector_service import confluent_connector_service
     from app.services.pipeline_monitor import pipeline_monitor
+    from app.config import settings
 
     session = get_db_session()
     try:
@@ -449,6 +450,92 @@ async def start_pipeline(
             pipeline_monitor.log_event(pipeline_id, "error", str(e))
             raise HTTPException(status_code=500, detail=str(e))
 
+        # Create sink connector for ClickHouse
+        if pipeline.sink_type == "clickhouse":
+            try:
+                # Build Kafka topic names (Debezium format: server_name.schema.table)
+                server_name = f"dataflow_{pipeline_id[:8]}"
+                topics = []
+                table_mappings = []
+
+                for source_table in pipeline.source_tables:
+                    # source_table format: "schema.table"
+                    parts = source_table.split('.')
+                    schema_name = parts[0] if len(parts) > 1 else 'public'
+                    table_name = parts[-1]
+
+                    # Debezium topic name
+                    topic_name = f"{server_name}.{schema_name}.{table_name}"
+                    topics.append(topic_name)
+
+                    # Determine ClickHouse table name
+                    # Check if custom mapping exists in sink_config
+                    ch_config = pipeline.sink_config.get('clickhouse', {})
+                    ch_table = ch_config.get('table', f"{table_name}_cdc")
+
+                    table_mappings.append({
+                        'topic': topic_name,
+                        'table': ch_table
+                    })
+
+                # Build sink configuration
+                sink_config = {
+                    'host': settings.clickhouse_host,
+                    'port': settings.clickhouse_port,
+                    'database': pipeline.sink_config.get('clickhouse', {}).get('database', settings.clickhouse_database),
+                    'username': settings.clickhouse_user,
+                    'password': settings.clickhouse_password,
+                    'table_mappings': table_mappings
+                }
+
+                # Create ClickHouse table(s) before starting sink connector
+                from app.services.clickhouse_service import clickhouse_service
+
+                # Ensure database exists
+                clickhouse_service.create_database(sink_config['database'])
+
+                # Create table for each source table (if createNew was selected)
+                ch_config = pipeline.sink_config.get('clickhouse', {})
+                if ch_config.get('createNew', True):
+                    schemas = pipeline.sink_config.get('schemas', [])
+                    for schema_info in schemas:
+                        columns = schema_info.get('schema', {}).get('columns', [])
+                        if columns:
+                            clickhouse_service.create_table(
+                                table_name=schema_info.get('clickhouse_table', ch_config.get('table')),
+                                columns=columns,
+                                engine="ReplacingMergeTree"
+                            )
+
+                # Create sink connector
+                sink_result = confluent_connector_service.create_sink_connector(
+                    pipeline_id=pipeline_id,
+                    sink_config=sink_config,
+                    topics=topics
+                )
+                pipeline.sink_connector_name = sink_result['connector_name']
+
+                pipeline_monitor.log_event(
+                    pipeline_id,
+                    "sink_created",
+                    f"ClickHouse sink connector created: {sink_result['connector_name']}"
+                )
+
+            except Exception as e:
+                # Clean up source connector if sink fails
+                if pipeline.source_connector_name:
+                    try:
+                        confluent_connector_service.delete_connector(pipeline.source_connector_name)
+                    except Exception:
+                        pass
+
+                pipeline.status = "failed"
+                pipeline.error_message = f"Failed to create ClickHouse sink connector: {str(e)}"
+                pipeline.source_connector_name = None
+                session.commit()
+                pipeline_monitor.log_event(pipeline_id, "error", str(e))
+                raise HTTPException(status_code=500, detail=str(e))
+
         # Update pipeline status
         pipeline.status = "running"
         pipeline.started_at = datetime.utcnow()
@@ -457,11 +544,16 @@ async def start_pipeline(
 
         pipeline_monitor.log_event(pipeline_id, "started", f"Pipeline '{pipeline.name}' started")
 
-        return {
+        response = {
             "message": "Pipeline started successfully",
             "status": "running",
             "source_connector": pipeline.source_connector_name
         }
+
+        if pipeline.sink_connector_name:
+            response["sink_connector"] = pipeline.sink_connector_name
+
+        return response
 
     except HTTPException:
         raise

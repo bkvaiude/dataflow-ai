@@ -4,11 +4,17 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import type { ChatAction, AlertRuleType, AlertSeverity } from '@/types';
-import { ExternalLink, Link2, Zap, Loader2, AlertTriangle, RefreshCw, X, Database, Table, Server, Bell } from 'lucide-react';
+import { ExternalLink, Link2, Zap, Loader2, AlertTriangle, RefreshCw, X, Database, Table, Server, Bell, FileJson, GitBranch } from 'lucide-react';
 import { initiateOAuth } from '@/lib/api';
 import { useAuthStore } from '@/stores/authStore';
 import { useChatStore } from '@/stores/chatStore';
 import { getSocket } from '@/lib/socket';
+import {
+  trackConfirmationAccepted,
+  trackPipelineCreated,
+  trackAlertRuleCreated,
+  trackFirstSourceConnected,
+} from '@/lib/analytics';
 
 // Import confirmation components
 import {
@@ -19,7 +25,11 @@ import {
   PipelineConfirmation,
   AlertConfigForm,
   GenericConfirmation,
+  ClickHouseConfigForm,
+  SchemaPreviewForm,
+  TopicRegistryConfirmation,
 } from './confirmations';
+import type { SchemaPreviewContext } from '@/types';
 
 interface ActionButtonProps {
   action: ChatAction;
@@ -42,7 +52,10 @@ export function ActionButton({ action, onClick }: ActionButtonProps) {
       action.type === 'confirm_destination' ||
       action.type === 'confirm_pipeline_create' ||
       action.type === 'confirm_alert_config' ||
-      action.type === 'confirm_action'
+      action.type === 'confirm_action' ||
+      action.type === 'confirm_clickhouse_config' ||
+      action.type === 'confirm_schema_preview' ||
+      action.type === 'confirm_topic_registry'
     ) {
       setShowConfirmation(true);
     }
@@ -68,6 +81,9 @@ export function ActionButton({ action, onClick }: ActionButtonProps) {
   const sendConfirmation = (actionType: string, data: Record<string, unknown>) => {
     const socket = getSocket();
     if (socket && user?.id) {
+      // Track confirmation event
+      trackConfirmationAccepted(actionType);
+
       socket.emit('chat_message', {
         message: `[Confirmation: ${actionType}]`,
         user_id: user.id,
@@ -168,6 +184,8 @@ export function ActionButton({ action, onClick }: ActionButtonProps) {
   const handleSourceSelect = (credentialId: string, credentialName: string, host: string, database: string) => {
     if (!action.sourceContext) return;
     setIsLoading(true);
+    // Track first source connected (conversion goal)
+    trackFirstSourceConnected(credentialName);
     sendConfirmation('confirm_source_select', {
       credentialId,
       credentialName,
@@ -225,6 +243,8 @@ export function ActionButton({ action, onClick }: ActionButtonProps) {
   const handlePipelineConfirm = (pipelineName: string) => {
     if (!action.pipelineContext) return;
     setIsLoading(true);
+    // Track pipeline creation
+    trackPipelineCreated(pipelineName, action.pipelineContext.sinkType);
     sendConfirmation('confirm_pipeline_create', {
       ...action.pipelineContext,
       pipelineName,
@@ -243,6 +263,8 @@ export function ActionButton({ action, onClick }: ActionButtonProps) {
   }) => {
     if (!action.alertContext) return;
     setIsLoading(true);
+    // Track alert rule creation
+    trackAlertRuleCreated(config.ruleType);
     sendConfirmation('confirm_alert_config', {
       pipelineId: action.alertContext.pipelineId,
       ...config,
@@ -258,6 +280,37 @@ export function ActionButton({ action, onClick }: ActionButtonProps) {
       actionId: action.actionContext.actionId,
       confirmed: true,
       metadata: action.actionContext.metadata,
+    });
+  };
+
+  // ClickHouse config submission
+  const handleClickHouseConfig = (config: { database: string; table: string; createNew: boolean }) => {
+    if (!action.clickhouseContext) return;
+    setIsLoading(true);
+    sendConfirmation('confirm_clickhouse_config', {
+      ...config,
+      sessionId: action.clickhouseContext.sessionId,
+    });
+  };
+
+  // Schema preview approval
+  const handleSchemaApproval = (data: { analyticsIntent: string; approvedSchema: NonNullable<SchemaPreviewContext['generatedSchema']> }) => {
+    if (!action.schemaContext) return;
+    setIsLoading(true);
+    sendConfirmation('confirm_schema_preview', {
+      ...data,
+      sessionId: action.schemaContext.sessionId,
+    });
+  };
+
+  // Topic registry confirmation
+  const handleTopicConfirm = () => {
+    if (!action.topicContext) return;
+    setIsLoading(true);
+    sendConfirmation('confirm_topic_registry', {
+      topicName: action.topicContext.topicName,
+      avroSchema: action.topicContext.avroSchema,
+      sessionId: action.topicContext.sessionId,
     });
   };
 
@@ -296,6 +349,12 @@ export function ActionButton({ action, onClick }: ActionButtonProps) {
         return <Server className="w-4 h-4" />;
       case 'confirm_alert_config':
         return <Bell className="w-4 h-4" />;
+      case 'confirm_clickhouse_config':
+        return <Database className="w-4 h-4" />;
+      case 'confirm_schema_preview':
+        return <FileJson className="w-4 h-4" />;
+      case 'confirm_topic_registry':
+        return <GitBranch className="w-4 h-4" />;
       default:
         return <Link2 className="w-4 h-4" />;
     }
@@ -428,6 +487,45 @@ export function ActionButton({ action, onClick }: ActionButtonProps) {
           context={action.actionContext}
           onConfirm={handleGenericConfirm}
           onCancel={() => sendCancellation('confirm_action')}
+        />
+      </div>
+    );
+  }
+
+  // Render ClickHouse config form
+  if (action.type === 'confirm_clickhouse_config' && action.clickhouseContext && showConfirmation) {
+    return (
+      <div className="w-full py-2">
+        <ClickHouseConfigForm
+          context={action.clickhouseContext}
+          onConfirm={handleClickHouseConfig}
+          onCancel={() => sendCancellation('confirm_clickhouse_config', action.clickhouseContext?.sessionId)}
+        />
+      </div>
+    );
+  }
+
+  // Render schema preview form
+  if (action.type === 'confirm_schema_preview' && action.schemaContext && showConfirmation) {
+    return (
+      <div className="w-full py-2">
+        <SchemaPreviewForm
+          context={action.schemaContext}
+          onConfirm={handleSchemaApproval}
+          onCancel={() => sendCancellation('confirm_schema_preview', action.schemaContext?.sessionId)}
+        />
+      </div>
+    );
+  }
+
+  // Render topic registry confirmation
+  if (action.type === 'confirm_topic_registry' && action.topicContext && showConfirmation) {
+    return (
+      <div className="w-full py-2">
+        <TopicRegistryConfirmation
+          context={action.topicContext}
+          onConfirm={handleTopicConfirm}
+          onCancel={() => sendCancellation('confirm_topic_registry', action.topicContext?.sessionId)}
         />
       </div>
     );

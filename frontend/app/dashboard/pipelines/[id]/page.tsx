@@ -419,6 +419,16 @@ export default function PipelineDetailPage() {
   useEffect(() => {
     if (user && accessToken) {
       fetchPipeline();
+    } else if (!accessToken && typeof window !== 'undefined') {
+      // If we have no access token after localStorage check, stop loading
+      // Give a brief delay to allow localStorage to load
+      const timeout = setTimeout(() => {
+        const token = localStorage.getItem('access_token');
+        if (!token) {
+          setIsLoading(false);
+        }
+      }, 500);
+      return () => clearTimeout(timeout);
     }
   }, [user, accessToken, fetchPipeline]);
 
@@ -446,6 +456,22 @@ export default function PipelineDetailPage() {
   }
 
   if (!pipeline) {
+    // Check if user is not authenticated
+    if (!accessToken) {
+      return (
+        <div className="h-full flex items-center justify-center">
+          <div className="text-center">
+            <AlertCircle className="w-12 h-12 text-amber-500 mx-auto mb-4" />
+            <h2 className="text-xl font-display font-bold text-foreground mb-2">Authentication Required</h2>
+            <p className="text-muted-foreground mb-4">Please log in to view pipeline details.</p>
+            <Button onClick={() => router.push('/auth')}>
+              Sign In
+            </Button>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="h-full flex items-center justify-center">
         <div className="text-center">

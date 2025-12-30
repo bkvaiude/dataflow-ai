@@ -351,6 +351,143 @@ class ConfluentConnectorService:
         except Exception as e:
             raise Exception(f"Failed to get connector config: {str(e)}")
 
+    def create_sink_connector(
+        self,
+        pipeline_id: str,
+        sink_config: Dict[str, Any],
+        topics: List[str]
+    ) -> Dict[str, Any]:
+        """
+        Create a ClickHouse sink connector.
+
+        Args:
+            pipeline_id: Unique pipeline identifier
+            sink_config: Sink configuration containing ClickHouse connection details
+                {
+                    'host': 'clickhouse-host',
+                    'port': 8123,
+                    'database': 'dataflow',
+                    'username': 'default',
+                    'password': 'password',
+                    'table_mappings': [
+                        {'topic': 'topic_name', 'table': 'table_name'}
+                    ]
+                }
+            topics: List of Kafka topics to consume from
+
+        Returns:
+            Connector configuration and status
+        """
+        connector_name = f"dataflow-clickhouse-{pipeline_id[:8]}"
+
+        # Build topic list and table mappings
+        topic_list = ",".join(topics)
+
+        # Extract ClickHouse connection details
+        ch_host = sink_config.get('host', 'localhost')
+        ch_port = sink_config.get('port', 8123)
+        ch_database = sink_config.get('database', 'dataflow')
+        ch_username = sink_config.get('username', 'default')
+        ch_password = sink_config.get('password', '')
+
+        # Build table mappings for ClickHouse connector
+        table_mappings = sink_config.get('table_mappings', [])
+
+        # Connector configuration for ClickHouse Kafka Connect Sink
+        connector_config = {
+            "name": connector_name,
+            "config": {
+                "connector.class": "com.clickhouse.kafka.connect.ClickHouseSinkConnector",
+                "tasks.max": "1",
+                "topics": topic_list,
+
+                # ClickHouse connection
+                "hostname": ch_host,
+                "port": str(ch_port),
+                "database": ch_database,
+                "username": ch_username,
+                "password": ch_password,
+                "ssl": "false",
+
+                # Kafka consumer configuration with SASL auth
+                "consumer.override.security.protocol": "SASL_SSL",
+                "consumer.override.sasl.mechanism": "PLAIN",
+                "consumer.override.sasl.jaas.config": f'org.apache.kafka.common.security.plain.PlainLoginModule required username="{self.kafka_api_key}" password="{self.kafka_api_secret}";',
+
+                # Data format - consume from Avro topics
+                "key.converter": "io.confluent.connect.avro.AvroConverter",
+                "key.converter.schema.registry.url": self.schema_registry_url,
+                "key.converter.basic.auth.credentials.source": "USER_INFO",
+                "key.converter.basic.auth.user.info": f"{self.schema_registry_key}:{self.schema_registry_secret}",
+                "value.converter": "io.confluent.connect.avro.AvroConverter",
+                "value.converter.schema.registry.url": self.schema_registry_url,
+                "value.converter.basic.auth.credentials.source": "USER_INFO",
+                "value.converter.basic.auth.user.info": f"{self.schema_registry_key}:{self.schema_registry_secret}",
+
+                # Insert settings
+                "exactlyOnce": "false",
+                "batch.size": "1000",
+                "buffer.count": "10000",
+
+                # Error handling
+                "errors.tolerance": "none",
+                "errors.log.enable": "true",
+                "errors.log.include.messages": "true"
+            }
+        }
+
+        # Add table mappings if provided
+        if table_mappings:
+            topic_to_table = {m['topic']: m['table'] for m in table_mappings}
+            connector_config["config"]["table.name.format"] = "custom"
+            connector_config["config"]["topic.to.table.map"] = json.dumps(topic_to_table)
+
+        if not self.is_configured():
+            # Mock mode for development
+            print(f"[CONNECTOR] Mock mode - would create sink connector: {connector_name}")
+            return {
+                'connector_name': connector_name,
+                'status': 'RUNNING',
+                'config': connector_config['config'],
+                'mock': True,
+                'topics': topics,
+                'clickhouse_host': ch_host,
+                'clickhouse_database': ch_database,
+                'created_at': datetime.utcnow().isoformat()
+            }
+
+        try:
+            mode = "local" if self.use_local_connect() else "cloud"
+            print(f"[CONNECTOR] Creating sink connector via {mode}: {connector_name}")
+
+            response = httpx.post(
+                self._get_base_url(),
+                headers=self._get_headers(),
+                json=connector_config,
+                timeout=30.0
+            )
+            response.raise_for_status()
+            result = response.json()
+
+            print(f"[CONNECTOR] Created sink connector: {connector_name}")
+            return {
+                'connector_name': connector_name,
+                'status': 'RUNNING',
+                'config': connector_config['config'],
+                'response': result,
+                'topics': topics,
+                'clickhouse_host': ch_host,
+                'clickhouse_database': ch_database,
+                'created_at': datetime.utcnow().isoformat(),
+                'mode': mode
+            }
+
+        except httpx.HTTPStatusError as e:
+            error_detail = e.response.text if e.response else str(e)
+            raise Exception(f"Failed to create sink connector: {error_detail}")
+        except Exception as e:
+            raise Exception(f"Sink connector creation failed: {str(e)}")
+
     def check_connect_health(self) -> Dict[str, Any]:
         """Check if Kafka Connect is healthy and reachable"""
         if not self.is_configured():

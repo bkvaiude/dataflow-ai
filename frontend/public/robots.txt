@@ -1,0 +1,22 @@
+# DataFlow AI - robots.txt
+# https://dataflow-ai.com
+
+User-agent: *
+Allow: /
+Allow: /features
+Allow: /pricing
+Allow: /faq
+
+# Disallow dashboard and authenticated routes
+Disallow: /dashboard
+Disallow: /dashboard/*
+Disallow: /auth
+Disallow: /auth/*
+Disallow: /api
+Disallow: /api/*
+
+# Sitemap location
+Sitemap: https://dataflow-ai.com/sitemap.xml
+
+# Crawl delay (optional, for polite crawling)
+Crawl-delay: 1
