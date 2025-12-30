@@ -486,6 +486,111 @@ async def start_pipeline(
             pipeline_monitor.log_event(pipeline_id, "error", str(e))
             raise HTTPException(status_code=500, detail=str(e))
 
+        # =================================================================
+        # ksqlDB FILTERING: Apply CDC filter if configured
+        # =================================================================
+        filtered_topics = {}  # Map: raw_topic -> filtered_topic (if filter applied)
+
+        # Check if pipeline has filter configuration
+        source_filters = pipeline.source_filters or {}
+        filter_sql = source_filters.get('filter_sql')  # e.g., "event_type IN ('login', 'logout')"
+
+        if filter_sql:
+            from app.services.ksqldb_service import ksqldb_service
+
+            try:
+                server_name = f"dataflow_{pipeline_id[:8]}"
+
+                for source_table in pipeline.source_tables:
+                    parts = source_table.split('.')
+                    schema_name = parts[0] if len(parts) > 1 else 'public'
+                    table_name = parts[-1]
+
+                    # Raw Debezium topic
+                    raw_topic = f"{server_name}.{schema_name}.{table_name}"
+
+                    # Names for ksqlDB objects
+                    source_stream_name = f"SRC_{pipeline_id[:8]}_{table_name}".upper()
+                    filtered_stream_name = f"FILTERED_{pipeline_id[:8]}_{table_name}".upper()
+                    filtered_topic = f"{raw_topic}_filtered"
+
+                    # Step 1: Create source stream from raw Debezium topic
+                    # Get schema from sink_config (approved columns)
+                    approved_schema = pipeline.sink_config.get('schema', {})
+                    columns = approved_schema.get('columns', [])
+
+                    if columns:
+                        # Map columns to ksqlDB types
+                        ksql_schema = []
+                        for col in columns:
+                            # Skip CDC metadata columns - they don't exist in source
+                            if col['name'].startswith('_'):
+                                continue
+                            ksql_type = col.get('clickhouseType', col.get('sourceType', 'STRING'))
+                            # Convert ClickHouse types to ksqlDB types
+                            if 'Int' in ksql_type:
+                                ksql_type = 'INTEGER'
+                            elif 'DateTime' in ksql_type or 'timestamp' in ksql_type.lower():
+                                ksql_type = 'TIMESTAMP'
+                            elif 'String' in ksql_type or 'varchar' in ksql_type.lower() or 'text' in ksql_type.lower():
+                                ksql_type = 'STRING'
+                            elif 'json' in ksql_type.lower():
+                                ksql_type = 'STRING'
+                            else:
+                                ksql_type = 'STRING'
+                            ksql_schema.append({'name': col['name'], 'type': ksql_type})
+
+                        # Create source stream (async call)
+                        import asyncio
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        try:
+                            # Create source stream
+                            source_result = loop.run_until_complete(
+                                ksqldb_service.create_stream(
+                                    name=source_stream_name,
+                                    topic=raw_topic,
+                                    schema=ksql_schema,
+                                    value_format="AVRO"
+                                )
+                            )
+                            pipeline_monitor.log_event(
+                                pipeline_id,
+                                "ksql_stream_created",
+                                f"Created ksqlDB source stream: {source_stream_name}"
+                            )
+
+                            # Step 2: Create filtered stream with WHERE clause
+                            filtered_result = loop.run_until_complete(
+                                ksqldb_service.create_filtered_stream(
+                                    source_stream=source_stream_name,
+                                    output_stream_name=filtered_stream_name,
+                                    where_clause=filter_sql,
+                                    output_topic=filtered_topic
+                                )
+                            )
+                            pipeline_monitor.log_event(
+                                pipeline_id,
+                                "ksql_filter_created",
+                                f"Created ksqlDB filtered stream: {filtered_stream_name} with filter: {filter_sql}"
+                            )
+
+                            # Map raw topic to filtered topic for sink connector
+                            filtered_topics[raw_topic] = filtered_topic
+
+                        finally:
+                            loop.close()
+
+            except Exception as ksql_err:
+                # Log warning but don't fail - sink will use raw topic
+                print(f"[PIPELINE] Warning: ksqlDB filtering failed: {ksql_err}")
+                pipeline_monitor.log_event(
+                    pipeline_id,
+                    "ksql_filter_warning",
+                    f"ksqlDB filtering failed, using raw topic: {str(ksql_err)}"
+                )
+                filtered_topics = {}  # Reset - use raw topics
+
         # Create sink connector for ClickHouse
         if pipeline.sink_type == "clickhouse":
             try:
@@ -500,8 +605,11 @@ async def start_pipeline(
                     schema_name = parts[0] if len(parts) > 1 else 'public'
                     table_name = parts[-1]
 
-                    # Debezium topic name
-                    topic_name = f"{server_name}.{schema_name}.{table_name}"
+                    # Debezium topic name (raw)
+                    raw_topic_name = f"{server_name}.{schema_name}.{table_name}"
+
+                    # Use filtered topic if available, otherwise raw topic
+                    topic_name = filtered_topics.get(raw_topic_name, raw_topic_name)
                     topics.append(topic_name)
 
                     # Determine ClickHouse table name

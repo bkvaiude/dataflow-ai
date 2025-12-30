@@ -1978,12 +1978,10 @@ def _generate_fallback_schema(
         if col.get('is_primary_key'):
             primary_keys.append(col['name'])
 
-    # Add CDC metadata columns
-    clickhouse_columns.extend([
-        {'name': '_deleted', 'type': 'UInt8', 'nullable': False},
-        {'name': '_version', 'type': 'UInt64', 'nullable': False},
-        {'name': '_inserted_at', 'type': 'DateTime64(3)', 'nullable': False}
-    ])
+    # NOTE: CDC metadata columns (_deleted, _version, _inserted_at) are NOT added here
+    # because Debezium's ExtractNewRecordState transform produces flat records without these fields.
+    # Adding them causes "Data schema validation failed" in the ClickHouse sink connector.
+    # If CDC upsert capability is needed, use ksqlDB to add these fields before sinking.
 
     # Determine ORDER BY
     order_by = primary_keys if primary_keys else [source_columns[0]['name']]

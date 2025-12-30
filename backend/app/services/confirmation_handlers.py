@@ -1150,6 +1150,18 @@ class ConfirmationHandlers:
                 clickhouse_config = session.get('clickhouse_config', {})
                 approved_schema = session.get('approved_schema', {})
 
+                # Build source_filters if filter was applied
+                source_filters = None
+                filter_sql = session.get('filter_sql')
+                filter_requirement = session.get('filter_requirement')
+                if filter_sql:
+                    source_filters = {
+                        'filter_sql': filter_sql,
+                        'filter_requirement': filter_requirement,
+                        'applied': True
+                    }
+                    print(f"[PIPELINE_CREATE] Filter will be applied: {filter_sql}")
+
                 pipeline = Pipeline(
                     id=str(uuid.uuid4()),
                     user_id=user_id,
@@ -1164,6 +1176,7 @@ class ConfirmationHandlers:
                         'avro_schema': session.get('avro_schema'),
                         'schema_registry_subject': session.get('schema_registry_subject')
                     },
+                    source_filters=source_filters,  # Include filter config for ksqlDB
                     status='pending'
                 )
                 db_session.add(pipeline)

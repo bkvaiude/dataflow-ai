@@ -168,7 +168,8 @@ class ClickHouseService:
         columns: List[Dict[str, Any]],
         engine: str = "ReplacingMergeTree",
         order_by: List[str] = None,
-        partition_by: str = None
+        partition_by: str = None,
+        add_cdc_metadata: bool = False  # DISABLED by default - causes schema mismatch with Debezium
     ) -> Dict[str, Any]:
         """
         Create a ClickHouse table.
@@ -179,6 +180,10 @@ class ClickHouseService:
             engine: Table engine (default: ReplacingMergeTree for upserts)
             order_by: ORDER BY columns (required for MergeTree engines)
             partition_by: Optional partition expression
+            add_cdc_metadata: Whether to add CDC metadata columns (_deleted, _version, _inserted_at)
+                              DISABLED by default because Debezium's ExtractNewRecordState transform
+                              does NOT produce these columns, causing schema validation failures
+                              in the ClickHouse sink connector.
 
         Returns:
             Table creation result
@@ -228,14 +233,22 @@ class ClickHouseService:
                     ch_type = f"Nullable({ch_type})"
                 col_defs.append(f"`{col['name']}` {ch_type}")
 
-            # Add metadata columns for CDC (only if not already in schema)
-            existing_col_names = {c['name'] for c in columns}
-            if '_deleted' not in existing_col_names:
-                col_defs.append("`_deleted` UInt8 DEFAULT 0")
-            if '_version' not in existing_col_names:
-                col_defs.append("`_version` UInt64 DEFAULT 0")
-            if '_inserted_at' not in existing_col_names:
-                col_defs.append("`_inserted_at` DateTime64(3) DEFAULT now64(3)")
+            # Add metadata columns for CDC only if explicitly requested
+            # NOTE: This is DISABLED by default because:
+            # 1. Debezium's ExtractNewRecordState transform produces flat records WITHOUT these fields
+            # 2. ClickHouse sink connector validates that ALL table columns exist in Avro schema
+            # 3. Missing columns cause "Data schema validation failed" errors
+            if add_cdc_metadata:
+                existing_col_names = {c['name'] for c in columns}
+                if '_deleted' not in existing_col_names:
+                    col_defs.append("`_deleted` UInt8 DEFAULT 0")
+                if '_version' not in existing_col_names:
+                    col_defs.append("`_version` UInt64 DEFAULT 0")
+                if '_inserted_at' not in existing_col_names:
+                    col_defs.append("`_inserted_at` DateTime64(3) DEFAULT now64(3)")
+                print(f"[CLICKHOUSE] Added CDC metadata columns for {table_name}")
+            else:
+                print(f"[CLICKHOUSE] Skipping CDC metadata columns for {table_name} (Debezium compatibility)")
 
             columns_sql = ",\n    ".join(col_defs)
 
