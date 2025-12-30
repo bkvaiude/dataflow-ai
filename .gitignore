@@ -1,3 +1,5 @@
 .playwright-mcp/
 ./test-environment
 test-environment
+docs
+.env
