@@ -1,0 +1,196 @@
+# Aggregate Transform Configuration
+# Creates windowed aggregations from stream data
+
+transform:
+  name: aggregate
+  display_name: "Windowed Aggregation"
+  description: "Aggregate data over time windows (count, sum, avg, etc.)"
+  icon: "bar-chart-2"
+  version: "1.0.0"
+
+parameters:
+  - name: window_type
+    type: select
+    label: "Window Type"
+    options:
+      - value: "tumbling"
+        label: "Tumbling Window"
+        description: "Fixed-size, non-overlapping windows"
+      - value: "hopping"
+        label: "Hopping Window"
+        description: "Fixed-size, overlapping windows"
+      - value: "session"
+        label: "Session Window"
+        description: "Dynamic windows based on activity gaps"
+    default: "tumbling"
+    required: true
+
+  - name: window_size
+    type: duration
+    label: "Window Size"
+    description: "Size of each window (e.g., 1 HOUR, 5 MINUTES)"
+    default: "1 HOUR"
+    required: true
+
+  - name: hop_size
+    type: duration
+    label: "Hop Size"
+    description: "For hopping windows, how often a new window starts"
+    default: "10 MINUTES"
+    required: false  # Only for hopping windows
+
+  - name: session_gap
+    type: duration
+    label: "Session Gap"
+    description: "For session windows, inactivity gap to close session"
+    default: "30 MINUTES"
+    required: false  # Only for session windows
+
+  - name: group_by
+    type: column_select
+    label: "Group By Columns"
+    description: "Columns to group aggregations by"
+    multi: true
+    required: true
+
+  - name: aggregations
+    type: aggregation_list
+    label: "Aggregations"
+    options:
+      - COUNT
+      - SUM
+      - AVG
+      - MIN
+      - MAX
+      - COUNT_DISTINCT
+    required: true
+
+ksqldb_templates:
+  tumbling: |
+    CREATE TABLE {{ output_table }}
+    WITH (
+      KAFKA_TOPIC='{{ output_topic }}',
+      VALUE_FORMAT='{{ value_format | default('AVRO') }}',
+      PARTITIONS={{ partitions | default(6) }}
+    ) AS
+    SELECT
+      {{ group_by | join(', ') }},
+      {% for agg in aggregations %}
+      {{ agg.function }}({{ agg.column }}) AS {{ agg.alias }}{% if not loop.last %},{% endif %}
+      {% endfor %},
+      WINDOWSTART AS window_start,
+      WINDOWEND AS window_end
+    FROM {{ source_stream }}
+    WINDOW TUMBLING (SIZE {{ window_size }})
+    GROUP BY {{ group_by | join(', ') }}
+    EMIT CHANGES;
+
+  hopping: |
+    CREATE TABLE {{ output_table }}
+    WITH (
+      KAFKA_TOPIC='{{ output_topic }}',
+      VALUE_FORMAT='{{ value_format | default('AVRO') }}',
+      PARTITIONS={{ partitions | default(6) }}
+    ) AS
+    SELECT
+      {{ group_by | join(', ') }},
+      {% for agg in aggregations %}
+      {{ agg.function }}({{ agg.column }}) AS {{ agg.alias }}{% if not loop.last %},{% endif %}
+      {% endfor %},
+      WINDOWSTART AS window_start,
+      WINDOWEND AS window_end
+    FROM {{ source_stream }}
+    WINDOW HOPPING (SIZE {{ window_size }}, ADVANCE BY {{ hop_size }})
+    GROUP BY {{ group_by | join(', ') }}
+    EMIT CHANGES;
+
+  session: |
+    CREATE TABLE {{ output_table }}
+    WITH (
+      KAFKA_TOPIC='{{ output_topic }}',
+      VALUE_FORMAT='{{ value_format | default('AVRO') }}',
+      PARTITIONS={{ partitions | default(6) }}
+    ) AS
+    SELECT
+      {{ group_by | join(', ') }},
+      {% for agg in aggregations %}
+      {{ agg.function }}({{ agg.column }}) AS {{ agg.alias }}{% if not loop.last %},{% endif %}
+      {% endfor %},
+      WINDOWSTART AS window_start,
+      WINDOWEND AS window_end
+    FROM {{ source_stream }}
+    WINDOW SESSION ({{ session_gap }} INACTIVITY GAP)
+    GROUP BY {{ group_by | join(', ') }}
+    EMIT CHANGES;
+
+ai_hints:
+  keywords:
+    - count
+    - sum
+    - average
+    - avg
+    - total
+    - per hour
+    - per day
+    - per minute
+    - aggregate
+    - group by
+    - window
+    - hourly
+    - daily
+    - weekly
+
+  example_prompts:
+    - input: "count logins per hour"
+      output:
+        window_type: "tumbling"
+        window_size: "1 HOUR"
+        group_by: []
+        aggregations:
+          - function: "COUNT"
+            column: "*"
+            alias: "login_count"
+
+    - input: "count events per user per day"
+      output:
+        window_type: "tumbling"
+        window_size: "1 DAY"
+        group_by:
+          - "user_id"
+        aggregations:
+          - function: "COUNT"
+            column: "*"
+            alias: "event_count"
+
+    - input: "total sales by product hourly"
+      output:
+        window_type: "tumbling"
+        window_size: "1 HOUR"
+        group_by:
+          - "product_id"
+        aggregations:
+          - function: "SUM"
+            column: "amount"
+            alias: "total_sales"
+
+    - input: "average order value per customer per week"
+      output:
+        window_type: "tumbling"
+        window_size: "7 DAYS"
+        group_by:
+          - "customer_id"
+        aggregations:
+          - function: "AVG"
+            column: "order_total"
+            alias: "avg_order_value"
+
+    - input: "session duration per user"
+      output:
+        window_type: "session"
+        session_gap: "30 MINUTES"
+        group_by:
+          - "user_id"
+        aggregations:
+          - function: "COUNT"
+            column: "*"
+            alias: "events_in_session"

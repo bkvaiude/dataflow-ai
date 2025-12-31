@@ -1,0 +1,118 @@
+# MySQL Source Module Configuration
+# This enables CDC (Change Data Capture) from MySQL databases
+# using Debezium connector
+
+module:
+  type: source
+  name: mysql
+  display_name: "MySQL"
+  icon: "database"
+  version: "1.0.0"
+
+capabilities:
+  supports_cdc: true
+  supports_full_load: true
+  supports_incremental: true
+  supported_formats:
+    - avro
+    - json
+
+credentials:
+  required:
+    - name: host
+      type: string
+      label: "Host"
+      placeholder: "localhost"
+    - name: port
+      type: integer
+      label: "Port"
+      default: 3306
+    - name: database
+      type: string
+      label: "Database Name"
+    - name: username
+      type: string
+      label: "Username"
+    - name: password
+      type: password
+      label: "Password"
+      encrypted: true
+  optional:
+    - name: ssl_mode
+      type: select
+      label: "SSL Mode"
+      options:
+        - disabled
+        - preferred
+        - required
+        - verify_ca
+        - verify_identity
+      default: "preferred"
+    - name: server_id
+      type: integer
+      label: "Server ID"
+      default: 85744
+      placeholder: "Unique server ID for binlog reading"
+
+connector_template:
+  class: "io.debezium.connector.mysql.MySqlConnector"
+  config:
+    database.hostname: "{{ credentials.host }}"
+    database.port: "{{ credentials.port }}"
+    database.user: "{{ credentials.username }}"
+    database.password: "{{ credentials.password }}"
+    database.server.name: "{{ pipeline.id }}"
+    database.server.id: "{{ credentials.server_id | default(85744) }}"
+    database.include.list: "{{ credentials.database }}"
+    table.include.list: "{{ tables | join(',') }}"
+    snapshot.mode: "initial"
+    include.schema.changes: "true"
+    key.converter: "io.confluent.connect.avro.AvroConverter"
+    key.converter.schema.registry.url: "{{ schema_registry.url }}"
+    key.converter.basic.auth.credentials.source: "USER_INFO"
+    key.converter.basic.auth.user.info: "{{ schema_registry.api_key }}:{{ schema_registry.api_secret }}"
+    value.converter: "io.confluent.connect.avro.AvroConverter"
+    value.converter.schema.registry.url: "{{ schema_registry.url }}"
+    value.converter.basic.auth.credentials.source: "USER_INFO"
+    value.converter.basic.auth.user.info: "{{ schema_registry.api_key }}:{{ schema_registry.api_secret }}"
+    transforms: "unwrap"
+    transforms.unwrap.type: "io.debezium.transforms.ExtractNewRecordState"
+    transforms.unwrap.drop.tombstones: "false"
+    transforms.unwrap.delete.handling.mode: "rewrite"
+    transforms.unwrap.add.fields: "op,table,source.ts_ms"
+    heartbeat.interval.ms: 60000
+
+schema_discovery:
+  query: |
+    SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE, IS_NULLABLE
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
+    ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION
+
+cdc_readiness_check:
+  queries:
+    - name: "Binary Log Enabled"
+      query: "SHOW VARIABLES LIKE 'log_bin'"
+      expected: "ON"
+      error_message: "Binary logging must be enabled for CDC"
+      fix: "Set log_bin=ON in my.cnf and restart MySQL"
+    - name: "Binary Log Format"
+      query: "SHOW VARIABLES LIKE 'binlog_format'"
+      expected: "ROW"
+      error_message: "Binary log format must be ROW for CDC"
+      fix: "SET GLOBAL binlog_format = 'ROW';"
+    - name: "Binary Log Row Image"
+      query: "SHOW VARIABLES LIKE 'binlog_row_image'"
+      expected: "FULL"
+      error_message: "Binary log row image should be FULL for complete CDC"
+      fix: "SET GLOBAL binlog_row_image = 'FULL';"
+    - name: "GTID Mode"
+      query: "SHOW VARIABLES LIKE 'gtid_mode'"
+      expected: "ON"
+      error_message: "GTID mode recommended for reliable CDC"
+      fix: "Enable GTID mode in my.cnf (requires careful migration)"
+
+cost_factors:
+  base_task_cost: 0.01  # $/hour per connector task
+  throughput_multiplier: 1.0
+  recommended_tasks: 1

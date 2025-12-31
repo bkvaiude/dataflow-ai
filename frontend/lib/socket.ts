@@ -19,9 +19,20 @@ export const initializeSocket = (callbacks: SocketCallbacks): Socket => {
     return socket;
   }
 
+  // Get JWT token from localStorage
+  const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
+
+  if (!token) {
+    console.error('No access token found - cannot connect to WebSocket');
+    throw new Error('Authentication required');
+  }
+
   socket = io(SOCKET_URL, {
     transports: ['websocket', 'polling'],
     autoConnect: true,
+    auth: {
+      token: token,
+    },
   });
 
   socket.on('connect', () => {
@@ -32,6 +43,24 @@ export const initializeSocket = (callbacks: SocketCallbacks): Socket => {
   socket.on('disconnect', () => {
     console.log('Socket disconnected');
     callbacks.onDisconnect?.();
+  });
+
+  socket.on('connect_error', (error) => {
+    console.error('Socket connection error:', error.message);
+
+    // Handle authentication errors
+    if (error.message.includes('auth') || error.message.includes('token') || error.message.includes('unauthorized')) {
+      console.error('WebSocket authentication failed - token may be expired');
+      callbacks.onError?.('Authentication failed. Please log in again.');
+
+      // Disconnect the socket
+      if (socket) {
+        socket.disconnect();
+        socket = null;
+      }
+    } else {
+      callbacks.onError?.(error.message);
+    }
   });
 
   socket.on('chat_response', (data: { message: string; actions?: ChatAction[] }) => {
@@ -47,13 +76,15 @@ export const initializeSocket = (callbacks: SocketCallbacks): Socket => {
   return socket;
 };
 
-export const sendChatMessage = (message: string, userId: string): void => {
+export const sendChatMessage = (message: string): void => {
   if (!socket?.connected) {
     console.error('Socket not connected');
     return;
   }
 
-  socket.emit('chat_message', { message, user_id: userId });
+  // user_id is now retrieved from the Socket.IO session on the backend
+  // No need to send it from the client anymore
+  socket.emit('chat_message', { message });
 };
 
 export const disconnectSocket = (): void => {

@@ -278,7 +278,9 @@ async def delete_pipeline(
         if not pipeline:
             raise HTTPException(status_code=404, detail="Pipeline not found")
 
-        server_name = f"dataflow_{pipeline_id[:8]}"
+        # Must match confluent_connector_service.py topic.prefix logic
+        unique_id = pipeline_id.replace("-", "")
+        server_name = f"dataflow_{unique_id}"
         print(f"[PIPELINE] Starting cleanup for pipeline {pipeline_id}")
 
         # 1. Cleanup enrichments (deactivate ksqlDB resources)
@@ -335,7 +337,8 @@ async def delete_pipeline(
         # 2. Delete Kafka topics (list by prefix and delete)
         try:
             all_topics = topic_service.list_topics(prefix=server_name)
-            enriched_topics = topic_service.list_topics(prefix=f"enriched_{pipeline_id[:8]}")
+            # Enriched topics also use full unique_id for consistency
+            enriched_topics = topic_service.list_topics(prefix=f"enriched_{unique_id[:8]}")
             topics_to_delete = list(set(all_topics + enriched_topics))
 
             for topic in topics_to_delete:
@@ -433,6 +436,44 @@ async def start_pipeline(
         if pipeline.status == "running":
             raise HTTPException(status_code=400, detail="Pipeline is already running")
 
+        # Pre-create Kafka topics before creating connectors
+        # Confluent Cloud doesn't auto-create topics
+        from app.services.topic_service import topic_service
+
+        # Must match confluent_connector_service.py topic.prefix logic
+        unique_id = pipeline_id.replace("-", "")
+        server_name = f"dataflow_{unique_id}"
+        topics_to_create = []
+
+        for source_table in pipeline.source_tables:
+            parts = source_table.split('.')
+            schema_name = parts[0] if len(parts) > 1 else 'public'
+            table_name = parts[-1]
+            topic_name = f"{server_name}.{schema_name}.{table_name}"
+            topics_to_create.append(topic_name)
+
+        # Also create schema history topic for Debezium
+        schema_history_topic = f"{server_name}.schema-history"
+        topics_to_create.append(schema_history_topic)
+
+        # Create all required topics
+        for topic in topics_to_create:
+            try:
+                topic_service.create_topic(
+                    topic_name=topic,
+                    partitions=3,
+                    replication_factor=3,
+                    retention_ms=604800000  # 7 days
+                )
+                pipeline_monitor.log_event(pipeline_id, "topic_created", f"Created topic: {topic}")
+            except Exception as e:
+                if "already exists" not in str(e).lower():
+                    pipeline.status = "failed"
+                    pipeline.error_message = f"Failed to create topic {topic}: {str(e)}"
+                    session.commit()
+                    pipeline_monitor.log_event(pipeline_id, "error", f"Topic creation failed: {str(e)}")
+                    raise HTTPException(status_code=500, detail=f"Failed to create topic: {str(e)}")
+
         # Create source connector
         try:
             connector_result = confluent_connector_service.create_source_connector(
@@ -450,11 +491,134 @@ async def start_pipeline(
             pipeline_monitor.log_event(pipeline_id, "error", str(e))
             raise HTTPException(status_code=500, detail=str(e))
 
+        # =================================================================
+        # ksqlDB FILTERING: Apply CDC filter if configured
+        # =================================================================
+        filtered_topics = {}  # Map: raw_topic -> filtered_topic (if filter applied)
+
+        # Check if pipeline has filter configuration
+        source_filters = pipeline.source_filters or {}
+        filter_sql = source_filters.get('filter_sql')  # e.g., "event_type IN ('login', 'logout')"
+
+        if filter_sql:
+            from app.services.ksqldb_service import ksqldb_service
+            from app.services.topic_service import topic_service
+            import asyncio
+
+            # Wait for Debezium to register schema before creating ksqlDB streams
+            # This prevents schema conflict between Debezium (Value) and ksqlDB (KsqlDataSourceSchema)
+            unique_id = pipeline_id.replace("-", "")
+            server_name = f"dataflow_{unique_id}"
+
+            for source_table in pipeline.source_tables:
+                parts = source_table.split('.')
+                schema_name = parts[0] if len(parts) > 1 else 'public'
+                table_name = parts[-1]
+                raw_topic = f"{server_name}.{schema_name}.{table_name}"
+                subject = f"{raw_topic}-value"
+
+                # Wait for Debezium to register schema (max 30 seconds)
+                pipeline_monitor.log_event(pipeline_id, "waiting_for_schema", f"Waiting for Debezium to register schema for {raw_topic}")
+                for attempt in range(15):
+                    schema_info = topic_service.get_schema(subject, version="latest")
+                    if schema_info and 'id' in schema_info:
+                        pipeline_monitor.log_event(pipeline_id, "schema_found", f"Found schema ID {schema_info['id']} for {raw_topic}")
+                        break
+                    await asyncio.sleep(2)
+                else:
+                    pipeline_monitor.log_event(pipeline_id, "warning", f"Schema not found after 30s for {raw_topic}, proceeding anyway")
+
+            try:
+                # Must match confluent_connector_service.py topic.prefix logic
+                unique_id = pipeline_id.replace("-", "")
+                server_name = f"dataflow_{unique_id}"
+
+                for source_table in pipeline.source_tables:
+                    parts = source_table.split('.')
+                    schema_name = parts[0] if len(parts) > 1 else 'public'
+                    table_name = parts[-1]
+
+                    # Raw Debezium topic
+                    raw_topic = f"{server_name}.{schema_name}.{table_name}"
+
+                    # Names for ksqlDB objects (use first 8 chars of unique_id for stream names)
+                    source_stream_name = f"SRC_{unique_id[:8]}_{table_name}".upper()
+                    filtered_stream_name = f"FILTERED_{unique_id[:8]}_{table_name}".upper()
+                    filtered_topic = f"{raw_topic}_filtered"
+
+                    # Step 1: Create source stream from raw Debezium topic
+                    # Get schema from sink_config (approved columns)
+                    approved_schema = pipeline.sink_config.get('schema', {})
+                    columns = approved_schema.get('columns', [])
+
+                    if columns:
+                        # Map columns to ksqlDB types
+                        ksql_schema = []
+                        for col in columns:
+                            # Skip CDC metadata columns - they don't exist in source
+                            if col['name'].startswith('_'):
+                                continue
+                            ksql_type = col.get('clickhouseType', col.get('sourceType', 'STRING'))
+                            # Convert ClickHouse types to ksqlDB types
+                            if 'Int' in ksql_type:
+                                ksql_type = 'INTEGER'
+                            elif 'DateTime' in ksql_type or 'timestamp' in ksql_type.lower():
+                                ksql_type = 'TIMESTAMP'
+                            elif 'String' in ksql_type or 'varchar' in ksql_type.lower() or 'text' in ksql_type.lower():
+                                ksql_type = 'STRING'
+                            elif 'json' in ksql_type.lower():
+                                ksql_type = 'STRING'
+                            else:
+                                ksql_type = 'STRING'
+                            ksql_schema.append({'name': col['name'], 'type': ksql_type})
+
+                        # Create source stream (async call - use await since we're in async context)
+                        # Create source stream
+                        source_result = await ksqldb_service.create_stream(
+                            name=source_stream_name,
+                            topic=raw_topic,
+                            schema=ksql_schema,
+                            value_format="AVRO"
+                        )
+                        pipeline_monitor.log_event(
+                            pipeline_id,
+                            "ksql_stream_created",
+                            f"Created ksqlDB source stream: {source_stream_name}"
+                        )
+
+                        # Step 2: Create filtered stream with WHERE clause
+                        filtered_result = await ksqldb_service.create_filtered_stream(
+                            source_stream=source_stream_name,
+                            output_stream_name=filtered_stream_name,
+                            where_clause=filter_sql,
+                            output_topic=filtered_topic
+                        )
+                        pipeline_monitor.log_event(
+                            pipeline_id,
+                            "ksql_filter_created",
+                            f"Created ksqlDB filtered stream: {filtered_stream_name} with filter: {filter_sql}"
+                        )
+
+                        # Map raw topic to filtered topic for sink connector
+                        filtered_topics[raw_topic] = filtered_topic
+
+            except Exception as ksql_err:
+                # Log warning but don't fail - sink will use raw topic
+                print(f"[PIPELINE] Warning: ksqlDB filtering failed: {ksql_err}")
+                pipeline_monitor.log_event(
+                    pipeline_id,
+                    "ksql_filter_warning",
+                    f"ksqlDB filtering failed, using raw topic: {str(ksql_err)}"
+                )
+                filtered_topics = {}  # Reset - use raw topics
+
         # Create sink connector for ClickHouse
         if pipeline.sink_type == "clickhouse":
             try:
                 # Build Kafka topic names (Debezium format: server_name.schema.table)
-                server_name = f"dataflow_{pipeline_id[:8]}"
+                # Must match confluent_connector_service.py topic.prefix logic
+                unique_id = pipeline_id.replace("-", "")
+                server_name = f"dataflow_{unique_id}"
                 topics = []
                 table_mappings = []
 
@@ -464,8 +628,11 @@ async def start_pipeline(
                     schema_name = parts[0] if len(parts) > 1 else 'public'
                     table_name = parts[-1]
 
-                    # Debezium topic name
-                    topic_name = f"{server_name}.{schema_name}.{table_name}"
+                    # Debezium topic name (raw)
+                    raw_topic_name = f"{server_name}.{schema_name}.{table_name}"
+
+                    # Use filtered topic if available, otherwise raw topic
+                    topic_name = filtered_topics.get(raw_topic_name, raw_topic_name)
                     topics.append(topic_name)
 
                     # Determine ClickHouse table name
@@ -497,15 +664,74 @@ async def start_pipeline(
                 # Create table for each source table (if createNew was selected)
                 ch_config = pipeline.sink_config.get('clickhouse', {})
                 if ch_config.get('createNew', True):
-                    schemas = pipeline.sink_config.get('schemas', [])
-                    for schema_info in schemas:
-                        columns = schema_info.get('schema', {}).get('columns', [])
-                        if columns:
-                            clickhouse_service.create_table(
-                                table_name=schema_info.get('clickhouse_table', ch_config.get('table')),
-                                columns=columns,
-                                engine="ReplacingMergeTree"
-                            )
+                    # Get approved schema - note: stored as 'schema' (singular) not 'schemas'
+                    approved_schema = pipeline.sink_config.get('schema', {})
+                    columns = approved_schema.get('columns', [])
+
+                    if columns:
+                        # =================================================================
+                        # KSQLDB COMPATIBILITY: Transform schema for ksqlDB output
+                        # =================================================================
+                        # When using ksqlDB filtering, the output has:
+                        # 1. UPPERCASE column names (ksqlDB standard)
+                        # 2. __DELETED column from Debezium's delete handling
+                        # We must match the ClickHouse table schema to ksqlDB output
+
+                        uses_ksqldb = bool(filtered_topics)  # True if ksqlDB filtering is active
+
+                        if uses_ksqldb:
+                            # Transform columns for ksqlDB compatibility
+                            # ksqlDB with VALUE_SCHEMA_ID preserves Debezium's lowercase column names
+                            ksql_columns = []
+                            for col in columns:
+                                # Skip CDC metadata columns that we added previously
+                                if col['name'].startswith('_') and col['name'] not in ['__deleted', '__DELETED']:
+                                    continue
+                                ksql_columns.append({
+                                    'name': col['name'].lower(),  # ksqlDB preserves lowercase from Debezium schema
+                                    'clickhouseType': col.get('clickhouseType', col.get('type', 'String')),
+                                    'nullable': True,  # ksqlDB makes all columns nullable in output
+                                    'is_primary_key': False  # No primary key for ksqlDB output
+                                })
+
+                            # Add __deleted column from Debezium (ksqlDB passes this through)
+                            ksql_columns.append({
+                                'name': '__deleted',
+                                'clickhouseType': 'String',
+                                'nullable': True,
+                                'is_primary_key': False
+                            })
+
+                            table_columns = ksql_columns
+                            engine = "MergeTree"  # Use MergeTree since we don't have _version
+                            print(f"[PIPELINE] Using ksqlDB-compatible schema with {len(table_columns)} lowercase columns")
+                        else:
+                            # Direct Debezium to ClickHouse - use original lowercase columns
+                            table_columns = columns
+                            engine = "ReplacingMergeTree"
+
+                        # ClickHouse Kafka Connect Sink requires table name = topic name
+                        # The connector does NOT support topic.to.table.map configuration
+                        for topic_name in topics:
+                            try:
+                                clickhouse_service.create_table(
+                                    table_name=topic_name,  # Must match topic name for ClickHouse connector
+                                    columns=table_columns,
+                                    engine=engine
+                                )
+                                pipeline_monitor.log_event(
+                                    pipeline_id,
+                                    "table_created",
+                                    f"Created ClickHouse table: {topic_name}"
+                                )
+                            except Exception as table_err:
+                                if "already exists" not in str(table_err).lower():
+                                    raise table_err
+                                pipeline_monitor.log_event(
+                                    pipeline_id,
+                                    "table_exists",
+                                    f"ClickHouse table already exists: {topic_name}"
+                                )
 
                 # Create sink connector
                 sink_result = confluent_connector_service.create_sink_connector(

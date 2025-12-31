@@ -1,5 +1,7 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 import socketio
 from contextlib import asynccontextmanager
 
@@ -8,6 +10,7 @@ from app.api.routes import router
 from app.services.gemini_service import GeminiService
 from app.services.metrics_processor import metrics_processor
 from app.services.monitoring_service import monitoring_service
+from app.utils.jwt_utils import verify_access_token
 
 # Socket.IO server
 sio = socketio.AsyncServer(
@@ -51,6 +54,25 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Security Headers Middleware
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+
+        # Security headers
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' ws: wss:"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+
+        return response
+
+# Add security headers middleware
+app.add_middleware(SecurityHeadersMiddleware)
+
 # CORS
 app.add_middleware(
     CORSMiddleware,
@@ -72,22 +94,76 @@ async def health_check():
 
 # Socket.IO events
 @sio.event
-async def connect(sid, environ):
-    print(f"Client connected: {sid}")
-    await sio.emit('chat_response', {
-        'message': 'Connected to DataFlow AI! How can I help you today?',
-        'actions': []
-    }, room=sid)
+async def connect(sid, environ, auth):
+    """
+    WebSocket connection handler with JWT authentication.
+    Validates token and stores user_id in session.
+    """
+    try:
+        # Extract token from auth dict
+        token = auth.get('token') if auth else None
+
+        if not token:
+            print(f"Connection rejected for {sid}: No token provided")
+            return False
+
+        # Verify JWT token
+        payload = verify_access_token(token)
+        if not payload:
+            print(f"Connection rejected for {sid}: Invalid token")
+            return False
+
+        # Extract user_id from token payload
+        user_id = payload.get('sub')
+        if not user_id:
+            print(f"Connection rejected for {sid}: No user_id in token")
+            return False
+
+        # Store user_id in Socket.IO session
+        await sio.save_session(sid, {'user_id': user_id})
+
+        print(f"Client connected: {sid} (user: {user_id})")
+        await sio.emit('chat_response', {
+            'message': 'Connected to DataFlow AI! How can I help you today?',
+            'actions': []
+        }, room=sid)
+
+        return True
+
+    except Exception as e:
+        print(f"Connection error for {sid}: {str(e)}")
+        return False
 
 
 @sio.event
 async def chat_message(sid, data):
-    """Handle incoming chat message"""
+    """Handle incoming chat message with session-based authentication"""
     import json
     from app.services.confirmation_handlers import confirmation_handlers
 
+    # Get user_id from Socket.IO session (set during connect)
+    try:
+        session = await sio.get_session(sid)
+        user_id = session.get('user_id')
+
+        if not user_id:
+            await sio.emit('chat_response', {
+                'message': 'Authentication error. Please reconnect.',
+                'actions': []
+            }, room=sid)
+            await sio.disconnect(sid)
+            return
+
+    except Exception as e:
+        print(f"Session error for {sid}: {str(e)}")
+        await sio.emit('chat_response', {
+            'message': 'Session error. Please reconnect.',
+            'actions': []
+        }, room=sid)
+        await sio.disconnect(sid)
+        return
+
     user_message = data.get('message', '')
-    user_id = data.get('user_id', 'anonymous')
 
     # Check for reprocess confirmation (legacy)
     reprocess_confirmation = data.get('_reprocess_confirmation')
@@ -113,6 +189,26 @@ async def chat_message(sid, data):
                 )
             elif action_type == 'confirm_tables':
                 response = await confirmation_handlers.handle_table_confirmation(
+                    confirmation, user_id
+                )
+            elif action_type == 'confirm_filter':
+                response = await confirmation_handlers.handle_filter_confirmation(
+                    confirmation, user_id
+                )
+            elif action_type == 'confirm_schema':
+                response = await confirmation_handlers.handle_schema_confirmation(
+                    confirmation, user_id
+                )
+            elif action_type == 'confirm_topic':
+                response = await confirmation_handlers.handle_topic_confirmation(
+                    confirmation, user_id
+                )
+            elif action_type == 'confirm_cost':
+                response = await confirmation_handlers.handle_cost_confirmation(
+                    confirmation, user_id
+                )
+            elif action_type == 'confirm_resources':
+                response = await confirmation_handlers.handle_resources_confirmation(
                     confirmation, user_id
                 )
             elif action_type == 'confirm_destination':

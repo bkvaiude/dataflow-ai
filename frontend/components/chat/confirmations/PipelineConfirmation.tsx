@@ -7,7 +7,7 @@ import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
-import { GitBranch, Database, Server, Table, CheckCircle, Loader2, ArrowRight } from 'lucide-react';
+import { GitBranch, Database, Server, Table, CheckCircle, Loader2, ArrowRight, DollarSign, TrendingDown, Zap } from 'lucide-react';
 import type { PipelineConfirmContext } from '@/types';
 
 interface PipelineConfirmationProps {

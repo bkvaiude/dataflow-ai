@@ -1,0 +1,150 @@
+# Join Transform Configuration
+# Joins streams or stream-table for data enrichment
+
+transform:
+  name: join
+  display_name: "Stream Join"
+  description: "Join streams or enrich stream data with lookup tables"
+  icon: "git-merge"
+  version: "1.0.0"
+
+parameters:
+  - name: join_type
+    type: select
+    label: "Join Type"
+    options:
+      - value: "inner"
+        label: "Inner Join"
+        description: "Only matching records from both sources"
+      - value: "left"
+        label: "Left Join"
+        description: "All records from left, matching from right"
+      - value: "full_outer"
+        label: "Full Outer Join"
+        description: "All records from both sources"
+    default: "left"
+    required: true
+
+  - name: left_source
+    type: stream_select
+    label: "Left Source (Stream/Table)"
+    description: "Primary data source"
+    required: true
+
+  - name: right_source
+    type: stream_select
+    label: "Right Source (Stream/Table)"
+    description: "Source to join with (for enrichment, this is typically a table)"
+    required: true
+
+  - name: left_key
+    type: column_select
+    label: "Left Join Key"
+    description: "Column from left source to join on"
+    required: true
+
+  - name: right_key
+    type: column_select
+    label: "Right Join Key"
+    description: "Column from right source to join on"
+    required: true
+
+  - name: within_duration
+    type: duration
+    label: "Within Duration"
+    description: "For stream-stream joins, time window for matching events"
+    default: "1 HOUR"
+    required: false
+
+  - name: select_columns
+    type: column_select
+    label: "Select Columns"
+    description: "Columns to include in output"
+    multi: true
+    required: false  # If not specified, select all
+
+ksqldb_templates:
+  stream_table: |
+    CREATE STREAM {{ output_stream }}
+    WITH (
+      KAFKA_TOPIC='{{ output_topic }}',
+      VALUE_FORMAT='{{ value_format | default('AVRO') }}',
+      PARTITIONS={{ partitions | default(6) }}
+    ) AS
+    SELECT
+      {% if select_columns %}
+      {{ select_columns | join(', ') }}
+      {% else %}
+      {{ left_source }}.*,
+      {{ right_source }}.*
+      {% endif %}
+    FROM {{ left_source }}
+    {{ join_type | upper }} JOIN {{ right_source }}
+      ON {{ left_source }}.{{ left_key }} = {{ right_source }}.{{ right_key }}
+    EMIT CHANGES;
+
+  stream_stream: |
+    CREATE STREAM {{ output_stream }}
+    WITH (
+      KAFKA_TOPIC='{{ output_topic }}',
+      VALUE_FORMAT='{{ value_format | default('AVRO') }}',
+      PARTITIONS={{ partitions | default(6) }}
+    ) AS
+    SELECT
+      {% if select_columns %}
+      {{ select_columns | join(', ') }}
+      {% else %}
+      {{ left_source }}.*,
+      {{ right_source }}.*
+      {% endif %}
+    FROM {{ left_source }}
+    {{ join_type | upper }} JOIN {{ right_source }}
+      WITHIN {{ within_duration }}
+      ON {{ left_source }}.{{ left_key }} = {{ right_source }}.{{ right_key }}
+    EMIT CHANGES;
+
+ai_hints:
+  keywords:
+    - join
+    - enrich
+    - lookup
+    - combine
+    - merge
+    - with user data
+    - with customer info
+    - add
+    - include
+
+  example_prompts:
+    - input: "enrich orders with customer data"
+      output:
+        join_type: "left"
+        left_source: "orders_stream"
+        right_source: "customers_table"
+        left_key: "customer_id"
+        right_key: "id"
+
+    - input: "join events with user profiles"
+      output:
+        join_type: "left"
+        left_source: "events_stream"
+        right_source: "users_table"
+        left_key: "user_id"
+        right_key: "id"
+
+    - input: "combine clickstream with purchases within 1 hour"
+      output:
+        join_type: "inner"
+        left_source: "clicks_stream"
+        right_source: "purchases_stream"
+        left_key: "session_id"
+        right_key: "session_id"
+        within_duration: "1 HOUR"
+
+    - input: "add product details to order items"
+      output:
+        join_type: "left"
+        left_source: "order_items_stream"
+        right_source: "products_table"
+        left_key: "product_id"
+        right_key: "id"

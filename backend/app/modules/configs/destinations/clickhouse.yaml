@@ -1,0 +1,150 @@
+# ClickHouse Destination Module Configuration
+# Sink connector for ClickHouse analytics database
+
+module:
+  type: destination
+  name: clickhouse
+  display_name: "ClickHouse"
+  icon: "bar-chart"
+  version: "1.0.0"
+
+capabilities:
+  supports_upsert: true
+  supports_delete: true
+  supports_schema_evolution: false
+  supported_formats:
+    - avro
+    - json
+
+credentials:
+  required:
+    - name: host
+      type: string
+      label: "Host"
+      placeholder: "your-clickhouse-host.cloud"
+    - name: port
+      type: integer
+      label: "HTTP Port"
+      default: 8443
+    - name: database
+      type: string
+      label: "Database"
+      default: "default"
+    - name: username
+      type: string
+      label: "Username"
+      default: "default"
+    - name: password
+      type: password
+      label: "Password"
+      encrypted: true
+  optional:
+    - name: ssl
+      type: boolean
+      label: "Use SSL"
+      default: true
+
+connector_template:
+  class: "com.clickhouse.kafka.connect.ClickHouseSinkConnector"
+  config:
+    hostname: "{{ credentials.host }}"
+    port: "{{ credentials.port }}"
+    database: "{{ credentials.database }}"
+    username: "{{ credentials.username }}"
+    password: "{{ credentials.password }}"
+    ssl: "{{ credentials.ssl | default(true) }}"
+    topics: "{{ topics | join(',') }}"
+    exactlyOnce: "true"
+    errors.retry.timeout: "60"
+    errors.tolerance: "all"
+    errors.deadletterqueue.topic.name: "{{ pipeline.id }}_dlq"
+    key.converter: "io.confluent.connect.avro.AvroConverter"
+    key.converter.schema.registry.url: "{{ schema_registry.url }}"
+    key.converter.basic.auth.credentials.source: "USER_INFO"
+    key.converter.basic.auth.user.info: "{{ schema_registry.api_key }}:{{ schema_registry.api_secret }}"
+    value.converter: "io.confluent.connect.avro.AvroConverter"
+    value.converter.schema.registry.url: "{{ schema_registry.url }}"
+    value.converter.basic.auth.credentials.source: "USER_INFO"
+    value.converter.basic.auth.user.info: "{{ schema_registry.api_key }}:{{ schema_registry.api_secret }}"
+    batch.size: "1000"
+    linger.ms: "1000"
+    consumer.override.max.poll.records: "5000"
+
+type_mapping:
+  # PostgreSQL / MySQL -> ClickHouse type mapping
+  integer: "Int32"
+  int: "Int32"
+  int4: "Int32"
+  bigint: "Int64"
+  int8: "Int64"
+  smallint: "Int16"
+  int2: "Int16"
+  tinyint: "Int8"
+
+  text: "String"
+  varchar: "String"
+  character varying: "String"
+  char: "String"
+  character: "String"
+  longtext: "String"
+  mediumtext: "String"
+
+  boolean: "UInt8"
+  bool: "UInt8"
+
+  timestamp: "DateTime64(3)"
+  timestamp without time zone: "DateTime64(3)"
+  timestamp with time zone: "DateTime64(3)"
+  timestamptz: "DateTime64(3)"
+  datetime: "DateTime64(3)"
+
+  date: "Date"
+
+  time: "String"
+  time without time zone: "String"
+  time with time zone: "String"
+
+  numeric: "Decimal(18, 4)"
+  decimal: "Decimal(18, 4)"
+  money: "Decimal(18, 4)"
+
+  real: "Float32"
+  float4: "Float32"
+  float: "Float32"
+
+  double precision: "Float64"
+  float8: "Float64"
+  double: "Float64"
+
+  json: "String"
+  jsonb: "String"
+
+  uuid: "UUID"
+
+  bytea: "String"
+  blob: "String"
+  binary: "String"
+  varbinary: "String"
+
+  array: "Array(String)"
+
+  # Default fallback
+  default: "String"
+
+table_template: |
+  CREATE TABLE IF NOT EXISTS {{ database }}.{{ table_name }} (
+    {% for col in columns %}
+    `{{ col.name }}` {{ col.clickhouse_type }}{% if not loop.last %},{% endif %}
+    {% endfor %},
+    `_deleted` UInt8 DEFAULT 0,
+    `_version` UInt64 DEFAULT 0,
+    `_inserted_at` DateTime64(3) DEFAULT now64()
+  )
+  ENGINE = ReplacingMergeTree(_version)
+  ORDER BY ({{ primary_keys | join(', ') }})
+  SETTINGS index_granularity = 8192
+
+cost_factors:
+  storage_gb_month: 0.02  # $/GB/month
+  query_cost: 0.0001  # $/query (approximate for cloud)
+  compute_cost: 0.05  # $/hour for compute

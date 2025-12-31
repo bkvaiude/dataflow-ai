@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import type { ChatAction, AlertRuleType, AlertSeverity } from '@/types';
-import { ExternalLink, Link2, Zap, Loader2, AlertTriangle, RefreshCw, X, Database, Table, Server, Bell, FileJson, GitBranch } from 'lucide-react';
+import { ExternalLink, Link2, Zap, Loader2, AlertTriangle, RefreshCw, X, Database, Table, Server, Bell, FileJson, GitBranch, Filter, DollarSign } from 'lucide-react';
 import { initiateOAuth } from '@/lib/api';
 import { useAuthStore } from '@/stores/authStore';
 import { useChatStore } from '@/stores/chatStore';
@@ -28,6 +28,8 @@ import {
   ClickHouseConfigForm,
   SchemaPreviewForm,
   TopicRegistryConfirmation,
+  FilterConfirmation,
+  CostEstimate,
 } from './confirmations';
 import type { SchemaPreviewContext } from '@/types';
 
@@ -50,12 +52,14 @@ export function ActionButton({ action, onClick }: ActionButtonProps) {
       action.type === 'confirm_credentials' ||
       action.type === 'confirm_tables' ||
       action.type === 'confirm_destination' ||
+      action.type === 'confirm_cost' ||
       action.type === 'confirm_pipeline_create' ||
       action.type === 'confirm_alert_config' ||
       action.type === 'confirm_action' ||
       action.type === 'confirm_clickhouse_config' ||
       action.type === 'confirm_schema_preview' ||
-      action.type === 'confirm_topic_registry'
+      action.type === 'confirm_topic_registry' ||
+      action.type === 'confirm_filter'
     ) {
       setShowConfirmation(true);
     }
@@ -84,9 +88,9 @@ export function ActionButton({ action, onClick }: ActionButtonProps) {
       // Track confirmation event
       trackConfirmationAccepted(actionType);
 
+      // user_id is retrieved from Socket.IO session on backend - no need to send it
       socket.emit('chat_message', {
         message: `[Confirmation: ${actionType}]`,
-        user_id: user.id,
         _confirmation: {
           action_type: actionType,
           ...data,
@@ -101,9 +105,9 @@ export function ActionButton({ action, onClick }: ActionButtonProps) {
   const sendCancellation = (actionType: string, sessionId?: string) => {
     const socket = getSocket();
     if (socket && user?.id) {
+      // user_id is retrieved from Socket.IO session on backend - no need to send it
       socket.emit('chat_message', {
         message: 'I cancelled the operation.',
-        user_id: user.id,
         _confirmation: {
           action_type: actionType,
           cancelled: true,
@@ -167,9 +171,9 @@ export function ActionButton({ action, onClick }: ActionButtonProps) {
         ? `Yes, reprocess my ${action.confirmationData.connectorId} data`
         : 'No, skip reprocessing and use existing data';
 
+      // user_id is retrieved from Socket.IO session on backend - no need to send it
       socket.emit('chat_message', {
         message,
-        user_id: user.id,
         _reprocess_confirmation: {
           confirmed,
           ...action.confirmationData,
@@ -314,6 +318,37 @@ export function ActionButton({ action, onClick }: ActionButtonProps) {
     });
   };
 
+  // Filter confirmation (apply or skip)
+  const handleFilterConfirm = (applyFilter: boolean) => {
+    if (!action.filterContext) return;
+    setIsLoading(true);
+    if (applyFilter) {
+      sendConfirmation('confirm_filter', {
+        filterSql: action.filterContext.filterSql,
+        filterColumn: action.filterContext.filterColumn,
+        filterValues: action.filterContext.filterValues,
+        filteredRowCount: action.filterContext.filteredRowCount,
+        sessionId: action.filterContext.sessionId,
+      });
+    } else {
+      // User chose to skip filter - send cancellation
+      sendConfirmation('confirm_filter', {
+        cancelled: true,
+        sessionId: action.filterContext.sessionId,
+      });
+    }
+  };
+
+  // Cost estimation confirmation
+  const handleCostConfirm = () => {
+    if (!action.costContext) return;
+    setIsLoading(true);
+    sendConfirmation('confirm_cost', {
+      estimatedCost: action.costContext.totals,
+      sessionId: action.costContext.sessionId,
+    });
+  };
+
   const handleClick = () => {
     if (action.type === 'oauth') {
       handleOAuthClick();
@@ -355,6 +390,10 @@ export function ActionButton({ action, onClick }: ActionButtonProps) {
         return <FileJson className="w-4 h-4" />;
       case 'confirm_topic_registry':
         return <GitBranch className="w-4 h-4" />;
+      case 'confirm_filter':
+        return <Filter className="w-4 h-4" />;
+      case 'confirm_cost':
+        return <DollarSign className="w-4 h-4" />;
       default:
         return <Link2 className="w-4 h-4" />;
     }
@@ -526,6 +565,54 @@ export function ActionButton({ action, onClick }: ActionButtonProps) {
           context={action.topicContext}
           onConfirm={handleTopicConfirm}
           onCancel={() => sendCancellation('confirm_topic_registry', action.topicContext?.sessionId)}
+        />
+      </div>
+    );
+  }
+
+  // Render filter confirmation
+  if (action.type === 'confirm_filter' && action.filterContext && showConfirmation) {
+    // Map backend filterContext to the FilterConfirmContext expected by FilterConfirmation
+    const filterConfirmContext = {
+      originalRequirement: action.filterContext.filterDescription || '',
+      column: action.filterContext.filterColumn || '',
+      operator: action.filterContext.filterOperator || 'IN',
+      values: action.filterContext.filterValues || [],
+      sqlWhere: action.filterContext.filterSql || '',
+      totalRows: action.filterContext.originalRowCount || 0,
+      filteredRows: action.filterContext.filteredRowCount || 0,
+      filterRatio: action.filterContext.originalRowCount
+        ? (action.filterContext.filteredRowCount || 0) / action.filterContext.originalRowCount
+        : 0,
+      reductionPercent: action.filterContext.originalRowCount
+        ? 100 - ((action.filterContext.filteredRowCount || 0) / action.filterContext.originalRowCount) * 100
+        : 0,
+      previewRows: action.filterContext.sampleData || [],
+      previewColumns: action.filterContext.tableColumns?.map((c: { name: string }) => c.name) || [],
+      alternativeColumns: [],
+      confidence: action.filterContext.confidence || 0.7,
+      sessionId: action.filterContext.sessionId || '',
+    };
+
+    return (
+      <div className="w-full py-2">
+        <FilterConfirmation
+          context={filterConfirmContext}
+          onConfirm={handleFilterConfirm}
+          onCancel={() => sendCancellation('confirm_filter', action.filterContext?.sessionId)}
+        />
+      </div>
+    );
+  }
+
+  // Render cost estimate confirmation
+  if (action.type === 'confirm_cost' && action.costContext && showConfirmation) {
+    return (
+      <div className="w-full py-2">
+        <CostEstimate
+          context={action.costContext}
+          onConfirm={handleCostConfirm}
+          onCancel={() => sendCancellation('confirm_cost', action.costContext?.sessionId)}
         />
       </div>
     );

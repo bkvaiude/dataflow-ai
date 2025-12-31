@@ -2,9 +2,11 @@
 
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { ActionButton } from './ActionButton';
+import { InlineActionRenderer } from './InlineActionRenderer';
 import type { ChatMessage } from '@/types';
 import { useAuthStore } from '@/stores/authStore';
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
+import { parseMessageActions } from '@/lib/actionParser';
 
 interface MessageBubbleProps {
   message: ChatMessage;
@@ -81,6 +83,24 @@ function FormattedText({ content }: { content: string }) {
 export function MessageBubble({ message }: MessageBubbleProps) {
   const { user } = useAuthStore();
   const isUser = message.role === 'user';
+  const [completedActions, setCompletedActions] = useState<Set<number>>(new Set());
+
+  // Parse message to extract embedded actions (for assistant messages only)
+  const { cleanContent, inlineActions } = useMemo(() => {
+    if (isUser) {
+      return { cleanContent: message.content, inlineActions: [] };
+    }
+    const parsed = parseMessageActions(message.content);
+    return { cleanContent: parsed.cleanContent, inlineActions: parsed.actions };
+  }, [message.content, isUser]);
+
+  const handleActionComplete = (index: number) => {
+    setCompletedActions(prev => new Set(prev).add(index));
+  };
+
+  // Check if all inline actions are completed
+  const hasActiveActions = inlineActions.length > 0 &&
+    inlineActions.some((_, index) => !completedActions.has(index));
 
   return (
     <div
@@ -110,34 +130,54 @@ export function MessageBubble({ message }: MessageBubbleProps) {
       )}
 
       {/* Message content */}
-      <div
-        className={`max-w-[80%] ${
-          isUser
-            ? 'bg-primary text-primary-foreground rounded-2xl rounded-tr-sm'
-            : 'glass rounded-2xl rounded-tl-sm'
-        } px-4 py-3`}
-      >
-        <div className="text-sm leading-relaxed">
-          <FormattedText content={message.content} />
-        </div>
+      <div className={`max-w-[80%] ${isUser ? '' : 'w-full'}`}>
+        {/* Text content */}
+        {cleanContent && (
+          <div
+            className={`${
+              isUser
+                ? 'bg-primary text-primary-foreground rounded-2xl rounded-tr-sm'
+                : 'glass rounded-2xl rounded-tl-sm'
+            } px-4 py-3 ${hasActiveActions ? 'mb-3' : ''}`}
+          >
+            <div className="text-sm leading-relaxed">
+              <FormattedText content={cleanContent} />
+            </div>
 
-        {/* Action buttons */}
-        {message.actions && message.actions.length > 0 && (
-          <div className="flex flex-wrap gap-2 mt-3 pt-3 border-t border-white/10">
-            {message.actions.map((action, index) => (
-              <ActionButton key={index} action={action} />
-            ))}
+            {/* Legacy action buttons (from backend actions array) */}
+            {message.actions && message.actions.length > 0 && (
+              <div className="flex flex-wrap gap-2 mt-3 pt-3 border-t border-white/10">
+                {message.actions.map((action, index) => (
+                  <ActionButton key={index} action={action} />
+                ))}
+              </div>
+            )}
+
+            {/* Timestamp */}
+            <div
+              className={`text-xs mt-2 ${
+                isUser ? 'text-primary-foreground/60' : 'text-muted-foreground'
+              }`}
+            >
+              {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </div>
           </div>
         )}
 
-        {/* Timestamp */}
-        <div
-          className={`text-xs mt-2 ${
-            isUser ? 'text-primary-foreground/60' : 'text-muted-foreground'
-          }`}
-        >
-          {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-        </div>
+        {/* Inline action components - rendered outside the bubble for better layout */}
+        {inlineActions.length > 0 && (
+          <div className="space-y-3 mt-2">
+            {inlineActions.map((action, index) => (
+              !completedActions.has(index) && (
+                <InlineActionRenderer
+                  key={`${action.type}-${index}`}
+                  action={action}
+                  onComplete={() => handleActionComplete(index)}
+                />
+              )
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

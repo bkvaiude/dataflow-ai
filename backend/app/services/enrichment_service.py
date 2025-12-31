@@ -892,19 +892,25 @@ class EnrichmentService:
 
     def _generate_stream_name(self, pipeline_id: str, source_topic: str) -> str:
         """Generate unique ksqlDB stream name."""
-        pipeline_short = str(pipeline_id)[:8]
+        # Use first 8 chars of unique_id (hyphens removed) for consistency
+        unique_id = str(pipeline_id).replace("-", "")
+        pipeline_short = unique_id[:8]
         topic_clean = source_topic.replace('.', '_').replace('-', '_').upper()
         return f"STREAM_{pipeline_short}_{topic_clean}"
 
     def _generate_table_name(self, pipeline_id: str, topic: str) -> str:
         """Generate unique ksqlDB table name."""
-        pipeline_short = str(pipeline_id)[:8]
+        # Use first 8 chars of unique_id (hyphens removed) for consistency
+        unique_id = str(pipeline_id).replace("-", "")
+        pipeline_short = unique_id[:8]
         topic_clean = topic.replace('.', '_').replace('-', '_').upper()
         return f"TABLE_{pipeline_short}_{topic_clean}"
 
     def _generate_output_topic(self, pipeline_id: str, name: str) -> str:
         """Generate output Kafka topic name."""
-        pipeline_short = str(pipeline_id)[:8]
+        # Use first 8 chars of unique_id (hyphens removed) for consistency
+        unique_id = str(pipeline_id).replace("-", "")
+        pipeline_short = unique_id[:8]
         name_clean = name.replace(' ', '_').replace('-', '_').lower()
         return f"enriched_{pipeline_short}_{name_clean}"
 

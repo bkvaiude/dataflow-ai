@@ -168,7 +168,8 @@ class ClickHouseService:
         columns: List[Dict[str, Any]],
         engine: str = "ReplacingMergeTree",
         order_by: List[str] = None,
-        partition_by: str = None
+        partition_by: str = None,
+        add_cdc_metadata: bool = False  # DISABLED by default - causes schema mismatch with Debezium
     ) -> Dict[str, Any]:
         """
         Create a ClickHouse table.
@@ -179,6 +180,10 @@ class ClickHouseService:
             engine: Table engine (default: ReplacingMergeTree for upserts)
             order_by: ORDER BY columns (required for MergeTree engines)
             partition_by: Optional partition expression
+            add_cdc_metadata: Whether to add CDC metadata columns (_deleted, _version, _inserted_at)
+                              DISABLED by default because Debezium's ExtractNewRecordState transform
+                              does NOT produce these columns, causing schema validation failures
+                              in the ClickHouse sink connector.
 
         Returns:
             Table creation result
@@ -189,35 +194,92 @@ class ClickHouseService:
             return {'table_name': table_name, 'created': True, 'mock': True}
 
         try:
+            # Debug: log incoming columns structure
+            print(f"[CLICKHOUSE] Creating table {table_name} with {len(columns)} columns")
+            if columns:
+                sample_col = columns[0]
+                print(f"[CLICKHOUSE] Sample column keys: {list(sample_col.keys())}")
+
+            # Determine ORDER BY first (needed to know which columns must be non-nullable)
+            if not order_by:
+                # Try to find primary key column (support both naming conventions)
+                pk_cols = [c['name'] for c in columns if c.get('is_primary_key') or c.get('isPrimaryKey')]
+                order_by = pk_cols if pk_cols else [columns[0]['name']]
+
+            order_by_set = set(order_by)
+
             # Build column definitions
             col_defs = []
             for col in columns:
-                ch_type = self._map_type(col.get('type', 'String'))
-                if col.get('nullable', True):
+                # Support multiple column formats:
+                # 1. clickhouseType - already mapped ClickHouse type from schema preview
+                # 2. type - generic type field
+                # 3. sourceType - PostgreSQL type that needs mapping
+                if col.get('clickhouseType'):
+                    # Already have ClickHouse type from schema preview UI
+                    ch_type = col['clickhouseType']
+                elif col.get('type'):
+                    # Generic type field - map from PostgreSQL
+                    ch_type = self._map_type(col['type'])
+                elif col.get('sourceType'):
+                    # Source type from schema preview
+                    ch_type = self._map_type(col['sourceType'])
+                else:
+                    ch_type = 'String'
+
+                # Make nullable unless it's used in ORDER BY (ClickHouse doesn't allow nullable ORDER BY columns)
+                is_order_by_col = col['name'] in order_by_set
+                if col.get('nullable', True) and not is_order_by_col:
                     ch_type = f"Nullable({ch_type})"
                 col_defs.append(f"`{col['name']}` {ch_type}")
 
-            # Add metadata columns for CDC
-            col_defs.append("`_deleted` UInt8 DEFAULT 0")
-            col_defs.append("`_version` UInt64 DEFAULT 0")
-            col_defs.append("`_inserted_at` DateTime64(3) DEFAULT now64(3)")
+            # Add metadata columns for CDC only if explicitly requested
+            # NOTE: This is DISABLED by default because:
+            # 1. Debezium's ExtractNewRecordState transform produces flat records WITHOUT these fields
+            # 2. ClickHouse sink connector validates that ALL table columns exist in Avro schema
+            # 3. Missing columns cause "Data schema validation failed" errors
+            if add_cdc_metadata:
+                existing_col_names = {c['name'] for c in columns}
+                if '_deleted' not in existing_col_names:
+                    col_defs.append("`_deleted` UInt8 DEFAULT 0")
+                if '_version' not in existing_col_names:
+                    col_defs.append("`_version` UInt64 DEFAULT 0")
+                if '_inserted_at' not in existing_col_names:
+                    col_defs.append("`_inserted_at` DateTime64(3) DEFAULT now64(3)")
+                print(f"[CLICKHOUSE] Added CDC metadata columns for {table_name}")
+            else:
+                print(f"[CLICKHOUSE] Skipping CDC metadata columns for {table_name} (Debezium compatibility)")
 
             columns_sql = ",\n    ".join(col_defs)
-
-            # Determine ORDER BY
-            if not order_by:
-                # Try to find primary key column
-                pk_cols = [c['name'] for c in columns if c.get('is_primary_key')]
-                order_by = pk_cols if pk_cols else [columns[0]['name']]
 
             order_by_sql = ", ".join(f"`{c}`" for c in order_by)
 
             # Build CREATE TABLE statement
+            # Use backticks to escape table names with dots (e.g., from Kafka topic names)
+            escaped_table_name = f"`{table_name}`" if "." in table_name else table_name
+
+            # Handle engine specification
+            # - MergeTree: no version column needed
+            # - ReplacingMergeTree: requires version column for deduplication
+            existing_col_names = {c['name'].upper() for c in columns}
+            if engine == "MergeTree":
+                engine_spec = "MergeTree()"
+            elif engine == "ReplacingMergeTree":
+                # Check if _version column exists (for CDC upserts)
+                if '_VERSION' in existing_col_names or '_version' in {c['name'] for c in columns}:
+                    engine_spec = "ReplacingMergeTree(_version)"
+                else:
+                    # Fallback to MergeTree if no version column
+                    engine_spec = "MergeTree()"
+                    print(f"[CLICKHOUSE] No _version column found, using MergeTree instead of ReplacingMergeTree")
+            else:
+                engine_spec = f"{engine}()"
+
             sql = f"""
-            CREATE TABLE IF NOT EXISTS {self.database}.{table_name} (
+            CREATE TABLE IF NOT EXISTS {self.database}.{escaped_table_name} (
                 {columns_sql}
             )
-            ENGINE = {engine}(_version)
+            ENGINE = {engine_spec}
             """
 
             if partition_by:
@@ -225,8 +287,9 @@ class ClickHouseService:
 
             sql += f"\nORDER BY ({order_by_sql})"
 
+            print(f"[CLICKHOUSE] Executing CREATE TABLE SQL for: {table_name}")
             client.command(sql)
-            print(f"[CLICKHOUSE] Created table: {table_name}")
+            print(f"[CLICKHOUSE] Successfully created table: {table_name}")
 
             return {
                 'table_name': table_name,
@@ -238,6 +301,7 @@ class ClickHouseService:
             }
 
         except Exception as e:
+            print(f"[CLICKHOUSE] ERROR creating table {table_name}: {str(e)}")
             if "already exists" in str(e).lower():
                 return {
                     'table_name': table_name,
