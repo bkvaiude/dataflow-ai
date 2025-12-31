@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Background gradient circle -->
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#3b82f6"/>
+      <stop offset="100%" style="stop-color:#8b5cf6"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded square background -->
+  <rect x="0" y="0" width="512" height="512" rx="96" fill="url(#bgGrad)"/>
+
+  <!-- 6 outer dots in hexagon pattern (scaled from 32 to 512) -->
+  <!-- Right (0deg) -->
+  <circle cx="416" cy="256" r="40" fill="white" opacity="0.9"/>
+  <!-- Top-right (300deg) -->
+  <circle cx="336" cy="117.44" r="40" fill="white" opacity="0.9"/>
+  <!-- Top-left (240deg) -->
+  <circle cx="176" cy="117.44" r="40" fill="white" opacity="0.9"/>
+  <!-- Left (180deg) -->
+  <circle cx="96" cy="256" r="40" fill="white" opacity="0.9"/>
+  <!-- Bottom-left (120deg) -->
+  <circle cx="176" cy="394.56" r="40" fill="white" opacity="0.9"/>
+  <!-- Bottom-right (60deg) -->
+  <circle cx="336" cy="394.56" r="40" fill="white" opacity="0.9"/>
+
+  <!-- Center bullseye - concentric rings -->
+  <!-- Outer ring -->
+  <circle cx="256" cy="256" r="80" fill="white"/>
+  <!-- Middle ring -->
+  <circle cx="256" cy="256" r="56" fill="#3b82f6"/>
+  <!-- Inner ring -->
+  <circle cx="256" cy="256" r="32" fill="white"/>
+  <!-- Center dot (bullseye) -->
+  <circle cx="256" cy="256" r="14" fill="#1e40af"/>
+</svg>
