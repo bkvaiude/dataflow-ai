@@ -116,6 +116,48 @@ class KsqlDBService:
 
     # DDL Operations
 
+    def _get_schema_id(self, topic: str, max_retries: int = 5, retry_delay: float = 2.0) -> Optional[int]:
+        """
+        Get the schema ID for a topic's value schema from Schema Registry.
+        This allows ksqlDB to use an existing schema instead of registering a new one.
+
+        Includes retry logic to wait for Debezium to register the schema.
+
+        Args:
+            topic: Kafka topic name
+            max_retries: Maximum number of retries if schema not found
+            retry_delay: Delay between retries in seconds
+
+        Returns:
+            Schema ID if found, None otherwise
+        """
+        import time
+        from app.services.topic_service import topic_service
+
+        subject = f"{topic}-value"
+
+        for attempt in range(max_retries):
+            try:
+                schema_info = topic_service.get_schema(subject, version="latest")
+                if schema_info and 'id' in schema_info:
+                    logger.info(f"[KSQLDB] Found existing schema ID {schema_info['id']} for {subject}")
+                    return schema_info['id']
+
+                # Schema not found yet, wait and retry
+                if attempt < max_retries - 1:
+                    logger.info(f"[KSQLDB] Schema not found for {subject}, waiting {retry_delay}s (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(retry_delay)
+
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"[KSQLDB] Error fetching schema for {subject}: {e}, retrying...")
+                    time.sleep(retry_delay)
+                else:
+                    logger.warning(f"[KSQLDB] Could not fetch schema for {subject} after {max_retries} attempts: {e}")
+
+        logger.warning(f"[KSQLDB] No schema found for {subject} after {max_retries} attempts, will let ksqlDB create one")
+        return None
+
     async def create_stream(
         self,
         name: str,
@@ -124,7 +166,8 @@ class KsqlDBService:
         value_format: str = "AVRO",
         key_column: Optional[str] = None,
         partitions: int = 3,
-        replicas: int = 3
+        replicas: int = 3,
+        use_existing_schema: bool = True
     ) -> Dict:
         """
         Create a ksqlDB STREAM from a Kafka topic.
@@ -137,6 +180,8 @@ class KsqlDBService:
             key_column: Optional key column name
             partitions: Number of partitions for underlying topic
             replicas: Replication factor for underlying topic
+            use_existing_schema: If True, use existing schema from Schema Registry
+                                 instead of registering a new one (prevents conflicts)
 
         Returns:
             Stream creation result
@@ -150,18 +195,32 @@ class KsqlDBService:
                 'mock': True
             }
 
-        # Build column definitions
-        columns = []
-        for col in schema:
-            col_name = col['name'].upper()
-            col_type = col['type'].upper()
-            columns.append(f"{col_name} {col_type}")
-
-        columns_sql = ", ".join(columns)
+        # Check for existing schema if using AVRO format
+        schema_id = None
+        if use_existing_schema and value_format.upper() == "AVRO":
+            schema_id = self._get_schema_id(topic)
+            if schema_id:
+                logger.info(f"[KSQLDB] Will use existing schema ID {schema_id} for stream {name}")
 
         # Build CREATE STREAM statement
-        ksql = f"CREATE STREAM {name.upper()} ({columns_sql}) "
-        ksql += f"WITH (KAFKA_TOPIC='{topic}', VALUE_FORMAT='{value_format}'"
+        # IMPORTANT: When using VALUE_SCHEMA_ID, we must NOT specify column definitions
+        # ksqlDB will infer the schema from Schema Registry
+        if schema_id:
+            # No column definitions - use schema from registry
+            ksql = f"CREATE STREAM {name.upper()} "
+            ksql += f"WITH (KAFKA_TOPIC='{topic}', VALUE_FORMAT='{value_format}'"
+            ksql += f", VALUE_SCHEMA_ID={schema_id}"
+        else:
+            # Build column definitions (only when NOT using existing schema)
+            columns = []
+            for col in schema:
+                col_name = col['name'].upper()
+                col_type = col['type'].upper()
+                columns.append(f"{col_name} {col_type}")
+            columns_sql = ", ".join(columns)
+
+            ksql = f"CREATE STREAM {name.upper()} ({columns_sql}) "
+            ksql += f"WITH (KAFKA_TOPIC='{topic}', VALUE_FORMAT='{value_format}'"
 
         if key_column:
             ksql += f", KEY_FORMAT='AVRO', KEY='{key_column.upper()}'"
@@ -171,12 +230,13 @@ class KsqlDBService:
         try:
             result = await self._execute_ksql(ksql)
 
-            logger.info(f"[KSQLDB] Created stream: {name.upper()}")
+            logger.info(f"[KSQLDB] Created stream: {name.upper()} (schema_id={schema_id})")
             return {
                 'stream_name': name.upper(),
                 'topic': topic,
                 'columns': len(schema),
                 'created': True,
+                'schema_id': schema_id,
                 'result': result
             }
 
@@ -782,8 +842,38 @@ class KsqlDBService:
         else:
             columns_sql = "*"
 
+        # Normalize where_clause column names for ksqlDB
+        # When using VALUE_SCHEMA_ID, column names must be backtick-quoted to preserve lowercase
+        # ksqlDB uppercases unquoted identifiers, but schema has lowercase column names
+        import re
+
+        # SQL keywords that should NOT be quoted
+        sql_keywords = {'AND', 'OR', 'NOT', 'IN', 'IS', 'NULL', 'TRUE', 'FALSE', 'LIKE', 'BETWEEN', 'EXISTS'}
+
+        # Wrap column names in backticks and lowercase them
+        def quote_column(match):
+            col = match.group(1)
+            # Don't quote SQL keywords
+            if col.upper() in sql_keywords:
+                return col
+            return f'`{col.lower()}`'
+
+        # Split by quoted strings to preserve them, then only transform non-quoted parts
+        parts = re.split(r"('(?:[^'\\]|\\.)*')", where_clause)
+        normalized_parts = []
+        for i, part in enumerate(parts):
+            if i % 2 == 0:  # Not a quoted string - transform identifiers
+                transformed = re.sub(r'\b([A-Za-z_][A-Za-z0-9_]*)\b', quote_column, part)
+                normalized_parts.append(transformed)
+            else:  # Quoted string - keep as-is
+                normalized_parts.append(part)
+        normalized_where = ''.join(normalized_parts)
+
+        logger.info(f"[KSQLDB] Normalized WHERE clause: '{where_clause}' -> '{normalized_where}'")
+
         # Build the CREATE STREAM AS SELECT query
-        query = f"SELECT {columns_sql} FROM {source_stream.upper()} WHERE {where_clause} EMIT CHANGES"
+        query = f"SELECT {columns_sql} FROM {source_stream.upper()} WHERE {normalized_where} EMIT CHANGES"
+        logger.info(f"[KSQLDB] Full query: {query}")
 
         ksql = f"CREATE STREAM {output_stream_name.upper()} "
         ksql += f"WITH (KAFKA_TOPIC='{output_topic or output_stream_name.lower()}', "

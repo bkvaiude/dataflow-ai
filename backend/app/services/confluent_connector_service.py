@@ -106,8 +106,11 @@ class ConfluentConnectorService:
             raise ValueError(f"Credential {credential_id} not found")
 
         credentials = cred_data['credentials']
-        connector_name = f"dataflow-pg-{pipeline_id[:8]}"
-        server_name = f"dataflow_{pipeline_id[:8]}"
+        # Use full pipeline_id (with hyphens removed) to ensure unique topic prefixes
+        # This prevents schema registry conflicts when pipelines are recreated
+        unique_id = pipeline_id.replace("-", "")
+        connector_name = f"dataflow-pg-{unique_id[:12]}"
+        server_name = f"dataflow_{unique_id}"
 
         # Build table include list
         table_include_list = ",".join(tables)
@@ -124,8 +127,8 @@ class ConfluentConnectorService:
                 "database.dbname": credentials.get('database'),
                 "topic.prefix": server_name,
                 "table.include.list": table_include_list,
-                "slot.name": f"dataflow_{pipeline_id[:8]}",
-                "publication.name": f"dataflow_{pipeline_id[:8]}_pub",
+                "slot.name": f"dataflow_{unique_id[:16]}",
+                "publication.name": f"dataflow_{unique_id[:16]}_pub",
                 "plugin.name": "pgoutput",
                 "snapshot.mode": snapshot_mode,
                 # Transforms
@@ -378,7 +381,9 @@ class ConfluentConnectorService:
         Returns:
             Connector configuration and status
         """
-        connector_name = f"dataflow-clickhouse-{pipeline_id[:8]}"
+        # Use consistent unique_id format with source connector
+        unique_id = pipeline_id.replace("-", "")
+        connector_name = f"dataflow-clickhouse-{unique_id[:12]}"
 
         # Build topic list and table mappings
         topic_list = ",".join(topics)
@@ -390,8 +395,8 @@ class ConfluentConnectorService:
         ch_username = sink_config.get('username', 'default')
         ch_password = sink_config.get('password', '')
 
-        # Build table mappings for ClickHouse connector
-        table_mappings = sink_config.get('table_mappings', [])
+        # Note: ClickHouse Kafka Connect Sink does NOT support custom table names
+        # Table name must match topic name exactly - topic.to.table.map is not supported
 
         # Connector configuration for ClickHouse Kafka Connect Sink
         connector_config = {
@@ -435,12 +440,6 @@ class ConfluentConnectorService:
                 "errors.log.include.messages": "true"
             }
         }
-
-        # Add table mappings if provided
-        if table_mappings:
-            topic_to_table = {m['topic']: m['table'] for m in table_mappings}
-            connector_config["config"]["table.name.format"] = "custom"
-            connector_config["config"]["topic.to.table.map"] = json.dumps(topic_to_table)
 
         if not self.is_configured():
             # Mock mode for development

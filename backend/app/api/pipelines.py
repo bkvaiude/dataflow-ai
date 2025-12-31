@@ -278,7 +278,9 @@ async def delete_pipeline(
         if not pipeline:
             raise HTTPException(status_code=404, detail="Pipeline not found")
 
-        server_name = f"dataflow_{pipeline_id[:8]}"
+        # Must match confluent_connector_service.py topic.prefix logic
+        unique_id = pipeline_id.replace("-", "")
+        server_name = f"dataflow_{unique_id}"
         print(f"[PIPELINE] Starting cleanup for pipeline {pipeline_id}")
 
         # 1. Cleanup enrichments (deactivate ksqlDB resources)
@@ -335,7 +337,8 @@ async def delete_pipeline(
         # 2. Delete Kafka topics (list by prefix and delete)
         try:
             all_topics = topic_service.list_topics(prefix=server_name)
-            enriched_topics = topic_service.list_topics(prefix=f"enriched_{pipeline_id[:8]}")
+            # Enriched topics also use full unique_id for consistency
+            enriched_topics = topic_service.list_topics(prefix=f"enriched_{unique_id[:8]}")
             topics_to_delete = list(set(all_topics + enriched_topics))
 
             for topic in topics_to_delete:
@@ -437,7 +440,9 @@ async def start_pipeline(
         # Confluent Cloud doesn't auto-create topics
         from app.services.topic_service import topic_service
 
-        server_name = f"dataflow_{pipeline_id[:8]}"
+        # Must match confluent_connector_service.py topic.prefix logic
+        unique_id = pipeline_id.replace("-", "")
+        server_name = f"dataflow_{unique_id}"
         topics_to_create = []
 
         for source_table in pipeline.source_tables:
@@ -497,9 +502,36 @@ async def start_pipeline(
 
         if filter_sql:
             from app.services.ksqldb_service import ksqldb_service
+            from app.services.topic_service import topic_service
+            import asyncio
+
+            # Wait for Debezium to register schema before creating ksqlDB streams
+            # This prevents schema conflict between Debezium (Value) and ksqlDB (KsqlDataSourceSchema)
+            unique_id = pipeline_id.replace("-", "")
+            server_name = f"dataflow_{unique_id}"
+
+            for source_table in pipeline.source_tables:
+                parts = source_table.split('.')
+                schema_name = parts[0] if len(parts) > 1 else 'public'
+                table_name = parts[-1]
+                raw_topic = f"{server_name}.{schema_name}.{table_name}"
+                subject = f"{raw_topic}-value"
+
+                # Wait for Debezium to register schema (max 30 seconds)
+                pipeline_monitor.log_event(pipeline_id, "waiting_for_schema", f"Waiting for Debezium to register schema for {raw_topic}")
+                for attempt in range(15):
+                    schema_info = topic_service.get_schema(subject, version="latest")
+                    if schema_info and 'id' in schema_info:
+                        pipeline_monitor.log_event(pipeline_id, "schema_found", f"Found schema ID {schema_info['id']} for {raw_topic}")
+                        break
+                    await asyncio.sleep(2)
+                else:
+                    pipeline_monitor.log_event(pipeline_id, "warning", f"Schema not found after 30s for {raw_topic}, proceeding anyway")
 
             try:
-                server_name = f"dataflow_{pipeline_id[:8]}"
+                # Must match confluent_connector_service.py topic.prefix logic
+                unique_id = pipeline_id.replace("-", "")
+                server_name = f"dataflow_{unique_id}"
 
                 for source_table in pipeline.source_tables:
                     parts = source_table.split('.')
@@ -509,9 +541,9 @@ async def start_pipeline(
                     # Raw Debezium topic
                     raw_topic = f"{server_name}.{schema_name}.{table_name}"
 
-                    # Names for ksqlDB objects
-                    source_stream_name = f"SRC_{pipeline_id[:8]}_{table_name}".upper()
-                    filtered_stream_name = f"FILTERED_{pipeline_id[:8]}_{table_name}".upper()
+                    # Names for ksqlDB objects (use first 8 chars of unique_id for stream names)
+                    source_stream_name = f"SRC_{unique_id[:8]}_{table_name}".upper()
+                    filtered_stream_name = f"FILTERED_{unique_id[:8]}_{table_name}".upper()
                     filtered_topic = f"{raw_topic}_filtered"
 
                     # Step 1: Create source stream from raw Debezium topic
@@ -584,7 +616,9 @@ async def start_pipeline(
         if pipeline.sink_type == "clickhouse":
             try:
                 # Build Kafka topic names (Debezium format: server_name.schema.table)
-                server_name = f"dataflow_{pipeline_id[:8]}"
+                # Must match confluent_connector_service.py topic.prefix logic
+                unique_id = pipeline_id.replace("-", "")
+                server_name = f"dataflow_{unique_id}"
                 topics = []
                 table_mappings = []
 
@@ -647,40 +681,41 @@ async def start_pipeline(
 
                         if uses_ksqldb:
                             # Transform columns for ksqlDB compatibility
+                            # ksqlDB with VALUE_SCHEMA_ID preserves Debezium's lowercase column names
                             ksql_columns = []
                             for col in columns:
                                 # Skip CDC metadata columns that we added previously
                                 if col['name'].startswith('_') and col['name'] not in ['__deleted', '__DELETED']:
                                     continue
                                 ksql_columns.append({
-                                    'name': col['name'].upper(),  # ksqlDB outputs UPPERCASE
-                                    'clickhouseType': col.get('clickhouseType', col.get('type', 'String')),  # Use clickhouseType key!
-                                    'nullable': col.get('nullable', True),
-                                    'is_primary_key': col.get('is_primary_key', col.get('isPrimaryKey', False))
+                                    'name': col['name'].lower(),  # ksqlDB preserves lowercase from Debezium schema
+                                    'clickhouseType': col.get('clickhouseType', col.get('type', 'String')),
+                                    'nullable': True,  # ksqlDB makes all columns nullable in output
+                                    'is_primary_key': False  # No primary key for ksqlDB output
                                 })
 
-                            # Add __DELETED column from Debezium (ksqlDB passes this through)
+                            # Add __deleted column from Debezium (ksqlDB passes this through)
                             ksql_columns.append({
-                                'name': '__DELETED',
-                                'clickhouseType': 'String',  # Use clickhouseType key!
+                                'name': '__deleted',
+                                'clickhouseType': 'String',
                                 'nullable': True,
                                 'is_primary_key': False
                             })
 
                             table_columns = ksql_columns
                             engine = "MergeTree"  # Use MergeTree since we don't have _version
-                            print(f"[PIPELINE] Using ksqlDB-compatible schema with {len(table_columns)} UPPERCASE columns")
+                            print(f"[PIPELINE] Using ksqlDB-compatible schema with {len(table_columns)} lowercase columns")
                         else:
                             # Direct Debezium to ClickHouse - use original lowercase columns
                             table_columns = columns
                             engine = "ReplacingMergeTree"
 
-                        # IMPORTANT: ClickHouse sink connector uses topic name as table name by default
-                        # So we must create tables with topic names (with dots escaped via backticks)
+                        # ClickHouse Kafka Connect Sink requires table name = topic name
+                        # The connector does NOT support topic.to.table.map configuration
                         for topic_name in topics:
                             try:
                                 clickhouse_service.create_table(
-                                    table_name=topic_name,  # Use topic name directly
+                                    table_name=topic_name,  # Must match topic name for ClickHouse connector
                                     columns=table_columns,
                                     engine=engine
                                 )

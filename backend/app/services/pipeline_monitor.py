@@ -162,7 +162,9 @@ class PipelineMonitor:
 
             # Get source tables to determine topics
             source_tables = pipeline.source_tables or []
-            server_name = f"dataflow_{pipeline_id[:8]}"
+            # Must match confluent_connector_service.py topic.prefix logic
+            unique_id = pipeline_id.replace("-", "")
+            server_name = f"dataflow_{unique_id}"
 
             lag_info = {
                 'pipeline_id': pipeline_id,

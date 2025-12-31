@@ -1,5 +1,7 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 import socketio
 from contextlib import asynccontextmanager
 
@@ -8,6 +10,7 @@ from app.api.routes import router
 from app.services.gemini_service import GeminiService
 from app.services.metrics_processor import metrics_processor
 from app.services.monitoring_service import monitoring_service
+from app.utils.jwt_utils import verify_access_token
 
 # Socket.IO server
 sio = socketio.AsyncServer(
@@ -50,6 +53,25 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan
 )
+
+# Security Headers Middleware
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+
+        # Security headers
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' ws: wss:"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+
+        return response
+
+# Add security headers middleware
+app.add_middleware(SecurityHeadersMiddleware)
 
 # CORS
 app.add_middleware(
