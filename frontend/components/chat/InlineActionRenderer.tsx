@@ -52,9 +52,9 @@ export function InlineActionRenderer({ action, onComplete }: InlineActionRendere
 
       const message = confirmed ? 'yes' : 'no';
 
+      // user_id is retrieved from Socket.IO session on backend - no need to send it
       socket.emit('chat_message', {
         message,
-        user_id: user.id,
         _confirmation: {
           action_type: action.type,
           confirmed,
@@ -220,24 +220,24 @@ function SourceSelectCard({ data, isLoading, onConfirm, onCancel }: CardProps) {
       </CardHeader>
       <CardContent className="space-y-3 pb-3">
         <div className="grid grid-cols-2 gap-2 text-sm">
-          {data.database && (
+          {data.database ? (
             <div className="p-2 rounded-lg bg-muted/30">
               <span className="text-muted-foreground text-xs">Database:</span>
               <p className="font-mono text-primary">{data.database as string}</p>
             </div>
-          )}
-          {data.host && (
+          ) : null}
+          {data.host ? (
             <div className="p-2 rounded-lg bg-muted/30">
               <span className="text-muted-foreground text-xs">Host:</span>
               <p className="font-mono truncate">{data.host as string}</p>
             </div>
-          )}
-          {data.source_type && (
+          ) : null}
+          {data.source_type ? (
             <div className="p-2 rounded-lg bg-muted/30">
               <span className="text-muted-foreground text-xs">Type:</span>
               <p className="font-mono">{data.source_type as string}</p>
             </div>
-          )}
+          ) : null}
         </div>
       </CardContent>
       <CardFooter className="flex gap-2 justify-end pt-3 border-t border-border/50">
@@ -482,30 +482,30 @@ function CostCard({ data, isLoading, onConfirm, onCancel }: CardProps) {
 
         {/* Cost breakdown */}
         <div className="mt-3 space-y-1.5 text-xs">
-          {data.kafka_cost && (
+          {data.kafka_cost ? (
             <div className="flex justify-between px-2">
               <span className="text-muted-foreground">Kafka throughput</span>
               <span className="font-mono">${(data.kafka_cost as number).toFixed(2)}</span>
             </div>
-          )}
-          {data.connector_cost && (
+          ) : null}
+          {data.connector_cost ? (
             <div className="flex justify-between px-2">
               <span className="text-muted-foreground">Connector tasks</span>
               <span className="font-mono">${(data.connector_cost as number).toFixed(2)}</span>
             </div>
-          )}
-          {data.ksqldb_cost && (
+          ) : null}
+          {data.ksqldb_cost ? (
             <div className="flex justify-between px-2">
               <span className="text-muted-foreground">ksqlDB processing</span>
               <span className="font-mono">${(data.ksqldb_cost as number).toFixed(2)}</span>
             </div>
-          )}
-          {data.storage_cost && (
+          ) : null}
+          {data.storage_cost ? (
             <div className="flex justify-between px-2">
               <span className="text-muted-foreground">Storage</span>
               <span className="font-mono">${(data.storage_cost as number).toFixed(2)}</span>
             </div>
-          )}
+          ) : null}
         </div>
       </CardContent>
       <CardFooter className="flex gap-2 justify-end pt-3 border-t border-border/50">
@@ -628,37 +628,37 @@ function ResourcesCard({ data, isLoading, onConfirm, onCancel }: CardProps) {
       </CardHeader>
       <CardContent className="pb-3">
         <div className="space-y-1.5 text-sm">
-          {data.kafka_topics && (
+          {data.kafka_topics ? (
             <div className="flex items-center gap-2 p-2 rounded-lg bg-muted/20">
               <GitBranch className="w-4 h-4 text-violet-400" />
               <span>Kafka topics</span>
               <Badge variant="outline" className="ml-auto text-xs">{(data.kafka_topics as string[]).length}</Badge>
             </div>
-          )}
-          {data.ksqldb_streams && (
+          ) : null}
+          {data.ksqldb_streams ? (
             <div className="flex items-center gap-2 p-2 rounded-lg bg-muted/20">
               <FileCode className="w-4 h-4 text-violet-400" />
               <span>ksqlDB streams</span>
             </div>
-          )}
-          {data.destination_table && (
+          ) : null}
+          {data.destination_table ? (
             <div className="flex items-center gap-2 p-2 rounded-lg bg-muted/20">
               <Database className="w-4 h-4 text-violet-400" />
               <span>Destination table: <code className="text-violet-400">{data.destination_table as string}</code></span>
             </div>
-          )}
-          {data.debezium_connector && (
+          ) : null}
+          {data.debezium_connector ? (
             <div className="flex items-center gap-2 p-2 rounded-lg bg-muted/20">
               <Server className="w-4 h-4 text-violet-400" />
               <span>Debezium connector</span>
             </div>
-          )}
-          {data.sink_connector && (
+          ) : null}
+          {data.sink_connector ? (
             <div className="flex items-center gap-2 p-2 rounded-lg bg-muted/20">
               <Server className="w-4 h-4 text-violet-400" />
               <span>Sink connector</span>
             </div>
-          )}
+          ) : null}
         </div>
       </CardContent>
       <CardFooter className="flex gap-2 justify-end pt-3 border-t border-border/50">
@@ -691,42 +691,42 @@ function PipelineCreateCard({ data, isLoading, onConfirm, onCancel }: CardProps)
       </CardHeader>
       <CardContent className="pb-3">
         <div className="space-y-2 text-sm">
-          {data.source && (
+          {data.source ? (
             <div className="flex items-center justify-between p-2 rounded-lg bg-muted/20">
               <span className="text-muted-foreground">Source</span>
               <span className="font-medium">{data.source as string}</span>
             </div>
-          )}
-          {data.table && (
+          ) : null}
+          {data.table ? (
             <div className="flex items-center justify-between p-2 rounded-lg bg-muted/20">
               <span className="text-muted-foreground">Table</span>
               <code className="text-primary">{data.table as string}</code>
             </div>
-          )}
-          {data.filter && (
+          ) : null}
+          {data.filter ? (
             <div className="flex items-center justify-between p-2 rounded-lg bg-purple-500/10">
               <span className="text-muted-foreground">Filter</span>
               <code className="text-purple-400 text-xs">{data.filter as string}</code>
             </div>
-          )}
-          {data.destination && (
+          ) : null}
+          {data.destination ? (
             <div className="flex items-center justify-between p-2 rounded-lg bg-muted/20">
               <span className="text-muted-foreground">Destination</span>
               <span className="font-medium text-green-400">{data.destination as string}</span>
             </div>
-          )}
-          {data.alert && (
+          ) : null}
+          {data.alert ? (
             <div className="flex items-center justify-between p-2 rounded-lg bg-muted/20">
               <span className="text-muted-foreground">Alert</span>
               <span className="text-rose-400">{data.alert as string}</span>
             </div>
-          )}
-          {data.cost && (
+          ) : null}
+          {data.cost ? (
             <div className="flex items-center justify-between p-2 rounded-lg bg-emerald-500/10">
               <span className="text-muted-foreground">Est. Cost</span>
               <span className="font-medium text-emerald-400">{data.cost as string}</span>
             </div>
-          )}
+          ) : null}
         </div>
       </CardContent>
       <CardFooter className="flex gap-2 justify-end pt-3 border-t border-border/50">

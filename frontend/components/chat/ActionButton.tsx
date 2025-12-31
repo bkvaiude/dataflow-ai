@@ -88,9 +88,9 @@ export function ActionButton({ action, onClick }: ActionButtonProps) {
       // Track confirmation event
       trackConfirmationAccepted(actionType);
 
+      // user_id is retrieved from Socket.IO session on backend - no need to send it
       socket.emit('chat_message', {
         message: `[Confirmation: ${actionType}]`,
-        user_id: user.id,
         _confirmation: {
           action_type: actionType,
           ...data,
@@ -105,9 +105,9 @@ export function ActionButton({ action, onClick }: ActionButtonProps) {
   const sendCancellation = (actionType: string, sessionId?: string) => {
     const socket = getSocket();
     if (socket && user?.id) {
+      // user_id is retrieved from Socket.IO session on backend - no need to send it
       socket.emit('chat_message', {
         message: 'I cancelled the operation.',
-        user_id: user.id,
         _confirmation: {
           action_type: actionType,
           cancelled: true,
@@ -171,9 +171,9 @@ export function ActionButton({ action, onClick }: ActionButtonProps) {
         ? `Yes, reprocess my ${action.confirmationData.connectorId} data`
         : 'No, skip reprocessing and use existing data';
 
+      // user_id is retrieved from Socket.IO session on backend - no need to send it
       socket.emit('chat_message', {
         message,
-        user_id: user.id,
         _reprocess_confirmation: {
           confirmed,
           ...action.confirmationData,

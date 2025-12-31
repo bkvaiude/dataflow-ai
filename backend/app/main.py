@@ -94,22 +94,76 @@ async def health_check():
 
 # Socket.IO events
 @sio.event
-async def connect(sid, environ):
-    print(f"Client connected: {sid}")
-    await sio.emit('chat_response', {
-        'message': 'Connected to DataFlow AI! How can I help you today?',
-        'actions': []
-    }, room=sid)
+async def connect(sid, environ, auth):
+    """
+    WebSocket connection handler with JWT authentication.
+    Validates token and stores user_id in session.
+    """
+    try:
+        # Extract token from auth dict
+        token = auth.get('token') if auth else None
+
+        if not token:
+            print(f"Connection rejected for {sid}: No token provided")
+            return False
+
+        # Verify JWT token
+        payload = verify_access_token(token)
+        if not payload:
+            print(f"Connection rejected for {sid}: Invalid token")
+            return False
+
+        # Extract user_id from token payload
+        user_id = payload.get('sub')
+        if not user_id:
+            print(f"Connection rejected for {sid}: No user_id in token")
+            return False
+
+        # Store user_id in Socket.IO session
+        await sio.save_session(sid, {'user_id': user_id})
+
+        print(f"Client connected: {sid} (user: {user_id})")
+        await sio.emit('chat_response', {
+            'message': 'Connected to DataFlow AI! How can I help you today?',
+            'actions': []
+        }, room=sid)
+
+        return True
+
+    except Exception as e:
+        print(f"Connection error for {sid}: {str(e)}")
+        return False
 
 
 @sio.event
 async def chat_message(sid, data):
-    """Handle incoming chat message"""
+    """Handle incoming chat message with session-based authentication"""
     import json
     from app.services.confirmation_handlers import confirmation_handlers
 
+    # Get user_id from Socket.IO session (set during connect)
+    try:
+        session = await sio.get_session(sid)
+        user_id = session.get('user_id')
+
+        if not user_id:
+            await sio.emit('chat_response', {
+                'message': 'Authentication error. Please reconnect.',
+                'actions': []
+            }, room=sid)
+            await sio.disconnect(sid)
+            return
+
+    except Exception as e:
+        print(f"Session error for {sid}: {str(e)}")
+        await sio.emit('chat_response', {
+            'message': 'Session error. Please reconnect.',
+            'actions': []
+        }, room=sid)
+        await sio.disconnect(sid)
+        return
+
     user_message = data.get('message', '')
-    user_id = data.get('user_id', 'anonymous')
 
     # Check for reprocess confirmation (legacy)
     reprocess_confirmation = data.get('_reprocess_confirmation')

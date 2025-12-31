@@ -648,8 +648,10 @@ export interface AlertRule {
     windowMinutes?: number;
     multiplier?: number;  // spike
     ratio?: number;       // drop
+    threshold?: number;   // drop (alias for ratio from chat form)
     // For gap_detection
     gapMinutes?: number;
+    minutes?: number;     // alias for gapMinutes/windowMinutes from chat form
     // For null_ratio
     columnName?: string;
     nullThreshold?: number;
