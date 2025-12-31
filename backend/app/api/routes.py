@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api import auth, chat, oauth, connectors, pipeline, credentials, sources, preview, templates, pipelines, ksqldb, enrichments, alerts
+from app.api import auth, chat, oauth, connectors, pipeline, credentials, sources, preview, templates, pipelines, ksqldb, enrichments, alerts, contact
 
 router = APIRouter()
 
@@ -17,3 +17,4 @@ router.include_router(pipelines.router, prefix="/pipelines", tags=["Pipelines"])
 router.include_router(ksqldb.router, prefix="/ksqldb", tags=["ksqlDB"])
 router.include_router(enrichments.router, prefix="/enrichments", tags=["Enrichments"])
 router.include_router(alerts.router, prefix="/alerts", tags=["Alerts"])
+router.include_router(contact.router, prefix="/contact", tags=["Contact"])

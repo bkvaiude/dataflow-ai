@@ -476,6 +476,35 @@ class AlertRule(Base):
         }
 
 
+class DemoRequest(Base):
+    """Demo request submissions from contact form"""
+    __tablename__ = "demo_requests"
+
+    id = Column(String(255), primary_key=True)
+    name = Column(String(255), nullable=False)
+    email = Column(String(255), nullable=False, index=True)
+    company = Column(String(255), nullable=False)
+    role = Column(String(255), nullable=True)
+    message = Column(Text, nullable=True)
+    status = Column(String(50), default="pending")  # pending, contacted, converted, closed
+    notes = Column(Text, nullable=True)  # Internal notes
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "email": self.email,
+            "company": self.company,
+            "role": self.role,
+            "message": self.message,
+            "status": self.status,
+            "created_at": to_iso_utc(self.created_at),
+            "updated_at": to_iso_utc(self.updated_at),
+        }
+
+
 class AlertHistory(Base):
     """History of triggered alerts"""
     __tablename__ = "alert_history"
